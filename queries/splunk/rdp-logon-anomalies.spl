@@ -1,0 +1,9 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=YOUR_WINDOWS_SECURITY_INDEX EventCode=4624 earliest=-24h latest=now
+| where tonumber(LogonType)=10
+| table _time Computer TargetUserName TargetDomainName
+    TargetLogonId IpAddress WorkstationName AuthenticationPackageName
+| sort 0 - _time
+| head 200
