@@ -1,0 +1,39 @@
+// ============================================================================
+// Hunt: DNS tunneling indicators in Defender network events
+// MITRE ATT&CK: T1048.003 (Exfiltration Over Unsecured Protocol),
+//              T1071.004 (DNS as C2 channel)
+// Data: Microsoft Defender - DeviceNetworkEvents
+// Write-up: https://amitvijayan.com/journal/articles/hunting-dns-tunneling-and-data.html
+// Logic: long queries, many labels, high-entropy-looking labels, and
+// rare query types (TXT/NULL) are the classic tunneling tells.
+// ============================================================================
+
+// -- Variant 1: scored tunneling hunt over DNS queries
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where RemotePort == 53 and ActionType == "DnsQuery"
+| where isnotempty(RemoteUrl)
+| extend QueryLen = strlen(RemoteUrl),
+         LabelCount = countof(RemoteUrl, "."),
+         // crude entropy proxy: ratio of unique chars to length
+         UniqueChars = array_length(set_union(split(RemoteUrl, ""))),
+         HasLongLabel = RemoteUrl matches regex @"[A-Za-z0-9+/=]{40,}"
+| extend SuspicionScore = (iff(QueryLen > 60, 2, 0)
+    + iff(LabelCount > 5, 1, 0) + iff(HasLongLabel, 2, 0))
+| summarize QueryCount = count(),
+            AvgLen = avg(QueryLen),
+            MaxLen = max(QueryLen),
+            SampleQuery = take_any(RemoteUrl),
+            MaxScore = max(SuspicionScore)
+    by DeviceName, bin(TimeGenerated, 1h),
+       Domain = tostring(split(RemoteUrl, ".")[-2])
+| where QueryCount > 200 or MaxLen > 100 or MaxScore >= 3
+| order by MaxScore desc, QueryCount desc
+
+// -- Variant 2: rare DNS query types often abused for tunneling
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where RemotePort == 53
+| where RemoteUrl has_any ("TXT", "NULL")  // adjust to your schema's query-type field
+| summarize count() by DeviceName, RemoteUrl
+| order by count_ desc
