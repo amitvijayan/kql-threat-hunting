@@ -1,0 +1,9 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=wineventlog EventCode=4698 earliest=-14d
+| rex field=_raw "TaskName:\\s+(?<task_name>\\S+)"
+| rex field=_raw "Task Content:\\s*(?<task_xml>[\\s\\S]*)"
+| rex field=task_xml "<Command>(?<task_command>.*?)</Command>"
+| where match(task_command, "(?i)(appdata|\\\\temp\\\\|powershell|cmd\\.exe|\\.ps1|\\.vbs|\\.js|http)")
+| table _time, host, user, task_name, task_command
