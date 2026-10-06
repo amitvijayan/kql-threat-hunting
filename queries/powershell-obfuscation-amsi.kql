@@ -1,0 +1,31 @@
+// ============================================================================
+// Hunt: obfuscated PowerShell + AMSI bypass indicators, scored
+// MITRE ATT&CK: T1059.001 (PowerShell), T1562.001 (Impair Defenses)
+// Data: Microsoft Defender - DeviceProcessEvents
+// Write-up: https://amitvijayan.com/journal/articles/hunting-obfuscated-powershell-and-amsi.html
+// ============================================================================
+let ObfuscationMarkers = dynamic([
+    "-enc", "-EncodedCommand", "-e ", "FromBase64String",
+    "Invoke-Expression", "IEX", "Invoke-Mimikatz",
+    "-w hidden", "-windowstyle hidden", "-noni", "-NoProfile"]);
+let AmsiBypassMarkers = dynamic([
+    "amsiInitFailed", "AmsiUtils", "amsi.dll",
+    "System.Management.Automation.AmsiUtils",
+    "amsiContext", "NonPublic,Static", "Set-MpPreference",
+    "DisableRealtimeMonitoring", "Reflection.Assembly"]);
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where FileName in~ ("powershell.exe", "pwsh.exe")
+| extend HasObfuscation = ProcessCommandLine has_any (ObfuscationMarkers),
+         HasAmsiBypass = ProcessCommandLine has_any (AmsiBypassMarkers),
+         LaunchedBySuspiciousParent = InitiatingProcessFileName in~
+             ("winword.exe", "excel.exe", "outlook.exe", "mshta.exe",
+              "wscript.exe", "cscript.exe", "rundll32.exe", "iexplore.exe", "chrome.exe")
+| where HasObfuscation or HasAmsiBypass
+| extend SuspicionScore = (iff(HasObfuscation, 1, 0)
+    + iff(HasAmsiBypass, 3, 0) + iff(LaunchedBySuspiciousParent, 2, 0))
+| project TimeGenerated, DeviceName, InitiatingProcessFileName,
+    InitiatingProcessCommandLine, ProcessCommandLine,
+    InitiatingProcessAccountName, HasObfuscation, HasAmsiBypass,
+    LaunchedBySuspiciousParent, SuspicionScore
+| order by SuspicionScore desc, TimeGenerated desc
