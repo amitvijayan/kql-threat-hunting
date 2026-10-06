@@ -1,0 +1,13 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=dns earliest=-7d
+| eval qlen=len(query), labels=mvcount(split(query, "."))
+| where qlen > 60 OR labels > 5 OR qtype IN ("TXT", "NULL", "CNAME")
+| stats count as queries, avg(qlen) as avg_len, max(qlen) as max_len,
+    values(qtype) as qtypes, earliest(_time) as first, latest(_time) as last
+    by src_ip, query_suffix
+| eval duration_min=round((last-first)/60, 1),
+       rate_per_min=round(queries/duration_min, 1)
+| where queries > 200 OR max_len > 100
+| sort - queries
