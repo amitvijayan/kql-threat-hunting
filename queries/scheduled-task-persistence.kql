@@ -1,0 +1,32 @@
+// ============================================================================
+// Hunt: Scheduled Task creation outside normal admin tooling
+// MITRE ATT&CK: T1053.005 (Scheduled Task)
+// Data: Microsoft Defender - DeviceProcessEvents, SecurityEvent (4688/4698)
+// Write-up: https://amitvijayan.com/journal/articles/hunting-scheduled-task-persistence.html
+// ============================================================================
+
+// -- Variant 1: schtasks.exe / PowerShell task cmdlets from suspicious parents
+let SuspiciousParents = dynamic(["cmd.exe", "powershell.exe", "pwsh.exe",
+    "wscript.exe", "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"]);
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where (FileName =~ "schtasks.exe" and ProcessCommandLine has_any ("/create", "/change", "/run"))
+    or (FileName in~ ("powershell.exe", "pwsh.exe")
+        and ProcessCommandLine has_any ("New-ScheduledTask", "Register-ScheduledTask",
+            "Set-ScheduledTask", "schtasks"))
+| extend TaskActionSuspicious = ProcessCommandLine has_any (
+    "%appdata%", "%temp%", "powershell", "cmd /c", "wscript",
+    "http://", "https://", "bitsadmin", "certutil", "-enc", "-EncodedCommand")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName,
+    InitiatingProcessCommandLine, FileName, ProcessCommandLine,
+    InitiatingProcessAccountName, TaskActionSuspicious
+| order by TaskActionSuspicious desc, TimeGenerated desc
+
+// -- Variant 2: 4698 task-creation audit events with suspicious actions
+SecurityEvent
+| where TimeGenerated > ago(14d)
+| where EventID == 4698
+| extend TaskName = extract(@"TaskName:\s+(\S+)", 1, EventData),
+         TaskCommand = extract(@"<Command>(.*?)</Command>", 1, EventData)
+| where TaskCommand has_any (@"\AppData\", @"\Temp\", "powershell", "cmd.exe", ".ps1", ".vbs", ".js")
+| project TimeGenerated, Computer, Account, TaskName, TaskCommand
