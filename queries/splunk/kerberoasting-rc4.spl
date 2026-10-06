@@ -1,0 +1,11 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=wineventlog EventCode=4769 TicketEncryptionType=0x17 ServiceName!="krbtgt*"
+| stats count as requests, dc(ServiceName) as unique_spns,
+        values(ServiceName) as spns, min(_time) as first, max(_time) as last
+        by AccountName, Computer, IpAddress
+| where requests >= 10 AND unique_spns >= 3
+| eval duration_min = round((last - first)/60, 1)
+| sort - requests
+| table AccountName, Computer, IpAddress, requests, unique_spns, duration_min, first, last, spns
