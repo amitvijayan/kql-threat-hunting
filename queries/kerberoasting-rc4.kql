@@ -1,0 +1,24 @@
+// ============================================================================
+// Hunt: Kerberoasting - RC4 service-ticket requests (Event 4769)
+// MITRE ATT&CK: T1558.003 (Kerberoasting)
+// Data: Microsoft Defender - SecurityEvent
+// Write-up: https://amitvijayan.com/journal/articles/hunting-kerberoasting-when-rc4-ticket.html
+// Logic: ticket encryption type 0x17 (RC4-HMAC) is the offline-crackable
+// flavor. A single account requesting many service tickets across many
+// SPNs in a short window is the classic Kerberoasting pattern.
+// ============================================================================
+SecurityEvent
+| where EventID == 4769
+| where TicketEncryptionType == "0x17"      // RC4-HMAC: the offline-crackable flavor
+| where ServiceName !~ "krbtgt"            // exclude the TGT service itself
+| where AccountName !~ "krbtgt"
+| summarize Requests = count(),
+            UniqueSPNs = dcount(ServiceName),
+            SPNs = make_set(ServiceName, 25),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by AccountName, Computer, IpAddress
+| where Requests >= 10 and UniqueSPNs >= 3
+| extend WindowMinutes = datetime_diff("minute", LastSeen, FirstSeen)
+| project AccountName, Computer, IpAddress, Requests, UniqueSPNs, WindowMinutes, FirstSeen, LastSeen, SPNs
+| order by Requests desc
