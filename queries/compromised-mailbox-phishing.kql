@@ -1,0 +1,39 @@
+// ============================================================================
+// Hunt: Compromised mailbox used as a phishing cannon (anomalous outbound
+// mail volume) + suspicious inbox forwarding rules
+// MITRE ATT&CK: T1078 (Valid Accounts), T1534 (Internal Spearphishing)
+// Data: Microsoft Defender - EmailEvents, OfficeActivity
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-6-2026.html
+// Logic: on Sep 30, 2026 an attacker used a compromised Nikkei Microsoft 365
+// account to send ~9,000 phishing emails to journalists and sources. The
+// initial access vector was not disclosed and no IoCs were published, so this
+// is a behavioral hunt: (1) per-sender outbound mail volume spikes in
+// EmailEvents, and (2) new/changed inbox rules that forward or redirect mail
+// in OfficeActivity - the classic "keep the access after the password reset"
+// move. The separate Google Workspace intrusion (Jul-Aug 2026, surfaced only
+// via a Google notification) is a reminder this pattern applies to any cloud
+// mail tenant, not just M365.
+// ============================================================================
+
+// -- Variant 1: senders with a sudden burst of outbound mail
+// A single user sending thousands of messages in an hour is the Nikkei tell.
+EmailEvents
+| where TimeGenerated > ago(7d)
+| summarize SentCount = count(),
+            UniqueRecipients = dcount(RecipientEmailAddress),
+            SampleSubjects = make_set(Subject, 10)
+    by SenderFromAddress, SenderIPv4, bin(TimeGenerated, 1h)
+| where SentCount >= 200 or UniqueRecipients >= 100
+| order by SentCount desc
+
+// -- Variant 2: inbox rules created or changed to forward/redirect mail
+// Attackers on a mailbox add forwarding rules so replies and sensitive mail
+// keep flowing to them even after the password is changed.
+OfficeActivity
+| where TimeGenerated > ago(30d)
+| where Operation in~ ("New-InboxRule", "Set-InboxRule", "UpdateInboxRule")
+| where Parameters has "ForwardTo"
+    or Parameters has "ForwardAsAttachmentTo"
+    or Parameters has "RedirectTo"
+| project TimeGenerated, Operation, UserId, ClientIP, Parameters
+| order by TimeGenerated desc
