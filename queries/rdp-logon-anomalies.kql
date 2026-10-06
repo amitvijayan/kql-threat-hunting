@@ -1,0 +1,16 @@
+// ============================================================================
+// Hunt: unexpected RDP logons (Logon Type 10)
+// MITRE ATT&CK: T1021.001 (Remote Desktop Protocol)
+// Data: Microsoft Defender - SecurityEvent (4624)
+// Write-up: https://amitvijayan.com/journal/articles/investigating-unexpected-rdp-logons.html
+// Triage: unexpected source IPs, odd hours, and service accounts doing
+// interactive logons are what you are looking for in the results.
+// ============================================================================
+SecurityEvent
+| where TimeGenerated > ago(24h)
+| where EventID == 4624 and LogonType == 10
+| project TimeGenerated, Computer, TargetUserName,
+    TargetDomainName, TargetLogonId, IpAddress,
+    WorkstationName, AuthenticationPackageName, EventRecordId
+| order by TimeGenerated desc
+| take 200
