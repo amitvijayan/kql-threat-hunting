@@ -1,0 +1,8 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=wineventlog EventCode=4104 earliest=-14d
+| where match(ScriptBlockText, "(?i)(amsiInitFailed|AmsiUtils|amsi\\.dll|amsiContext)")
+   OR match(ScriptBlockText, "(?i)(FromBase64String|Invoke-Mimikatz|Invoke-Shellcode|DownloadString|DownloadFile)")
+| eval decoded_preview=substr(ScriptBlockText, 1, 300)
+| table _time, host, user, MessageNumber, decoded_preview, ScriptBlockText
