@@ -1,0 +1,9 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=YOUR_SYSMON_INDEX EventCode=13 earliest=-24h latest=now
+| eval target=lower(TargetObject)
+| where like(target,"%currentversion%run%")
+| table _time Computer User Image ProcessGuid TargetObject Details
+| sort 0 - _time
+| head 200
