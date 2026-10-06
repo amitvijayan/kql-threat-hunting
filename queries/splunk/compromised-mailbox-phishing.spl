@@ -1,0 +1,15 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it the Microsoft 365 Management Activity API (o365 add-on) logs.
+// Replace the index names with your own. Same logic, same write-ups.
+
+index=o365 Workload=Exchange Operation=Send earliest=-7d
+| bin _time span=1h
+| stats count as sent, dc(Recipient) as unique_recipients,
+    values(Subject) as subjects by UserId, ClientIP, _time
+| where sent >= 200 OR unique_recipients >= 100
+| sort - sent
+
+index=o365 Workload=Exchange (Operation="New-InboxRule" OR Operation="Set-InboxRule" OR Operation="UpdateInboxRule") earliest=-30d
+| search Parameters="*ForwardTo*" OR Parameters="*ForwardAsAttachmentTo*" OR Parameters="*RedirectTo*"
+| table _time, Operation, UserId, ClientIP, Parameters
+| sort - _time
