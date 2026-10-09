@@ -1,0 +1,61 @@
+// ============================================================================
+// Hunt: FortiBleed campaign - FortiGate admin-account deletions and lockouts
+// MITRE ATT&CK: T1190 (Exploit Public-Facing Application), T1078 (Valid
+//   Accounts), T1562.001 (Impair Defenses: Disable or Modify Tools)
+// Data: FortiGate syslog/event logs forwarded to your SIEM (Microsoft
+//   Sentinel Syslog table shown as the example - point this at your
+//   Fortinet syslog forwarder or the FortiGate connector table instead)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-9-2026.html
+// Logic: per an FBI + US Secret Service joint advisory (October 6, 2026),
+// the FortiBleed credential-theft campaign is still active: 86,644+
+// compromised Fortinet devices across 194 countries, with attackers deleting
+// admin accounts and locking owners out of their own firewalls (BleepingComputer:
+// "Ongoing FortiBleed attacks lock out FortiGate VPN admins"). Stolen VPN
+// access is feeding INC/Lynx and Payload ransomware affiliates. Variant 1
+// hunts the signature observable of this campaign - admin-account lifecycle
+// changes (deletions and unexpected adds) in the firewall's own logs.
+// Variant 2 hunts the precursor: credential-stuffing-style failure bursts
+// against the admin GUI / SSL-VPN portal that precede a lockout.
+// ============================================================================
+
+// -- Variant 1: admin-account deletions and adds in FortiGate logs --
+// FortiGate syslogs carry the admin action in the message. Legit admin
+// changes are rare; a "delete admin" event from an external session is a
+// lockout in progress. Baseline what normal admin activity looks like
+// before alerting, then investigate every deletion and every add that
+// did not come from your own change process.
+Syslog
+| where TimeGenerated > ago(14d)
+| where SyslogMessage has "FortiGate" or ProcessName has "fortigate"
+   or SyslogMessage has_any ("logid=", "devname=", "fortigate")
+| where SyslogMessage has "admin"
+| where SyslogMessage has_any ("delete", "deleted", "delet", "add ", "added", "creat")
+   or SyslogMessage has_any ("admin deletion", "add admin", "new admin")
+| extend AdminAction = case(
+      SyslogMessage has "delete" or SyslogMessage has "delet", "admin-deleted",
+      SyslogMessage has "add" or SyslogMessage has "creat", "admin-added",
+      "admin-changed")
+| summarize EventCount = count(),
+            Sources = make_set(SyslogMessage, 3)
+    by TimeGenerated = bin(TimeGenerated, 1h), HostName, AdminAction
+| order by TimeGenerated desc
+
+// -- Variant 2: admin GUI / SSL-VPN login failure bursts (the lockout precursor) --
+// FortiBleed compromises start with harvested credentials; attackers then
+// log in to finish the lockout. A burst of failed admin/VPN logins from a
+// single external source - followed by any success - is the sequence this
+// campaign's affiliates use. Thresholds are a starting point: baseline first.
+Syslog
+| where TimeGenerated > ago(7d)
+| where SyslogMessage has "FortiGate" or ProcessName has "fortigate"
+   or SyslogMessage has_any ("logid=", "devname=", "fortigate")
+| where SyslogMessage has_any ("login", "logon", "auth", "authenticate")
+| extend LoginResult = case(
+      SyslogMessage has_any ("fail", "denied", "error", "invalid"), "failed",
+      SyslogMessage has_any ("success", "accepted", "permit"), "succeeded",
+      "other")
+| summarize FailedLogins = countif(LoginResult == "failed"),
+            SuccessfulLogins = countif(LoginResult == "succeeded"),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by bin(TimeGenerated, 1h), HostName
+| order by FailedLogins desc, TimeGenerated desc
