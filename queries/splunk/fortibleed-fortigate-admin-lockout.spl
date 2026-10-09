@@ -1,0 +1,31 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your FortiGate syslog/event logs (index=network shown here with
+// the Fortinet TA; adjust index and sourcetype to your own). Same logic,
+// same write-ups.
+
+index=network (sourcetype=fgt_event OR sourcetype="fortigate*" OR host="*fortigate*") earliest=-14d
+| search admin AND (delete* OR delet* OR add* OR creat*)
+| eval admin_action=case(
+    match(_raw, "(?i)delet"), "admin-deleted",
+    match(_raw, "(?i)(add|creat)"), "admin-added",
+    true(), "admin-changed")
+| bin _time span=1h
+| stats count as events, dc(src_ip) as sources, values(src_ip) as src_ips,
+    earliest(_time) as first, latest(_time) as last
+    by _time, host, admin_action
+| sort - _time
+
+// -- Variant 2: admin GUI / SSL-VPN login failure bursts (the lockout precursor) --
+index=network (sourcetype=fgt_event OR sourcetype="fortigate*" OR host="*fortigate*") earliest=-7d
+| search (login OR logon OR auth OR authenticate)
+| eval login_result=case(
+    match(_raw, "(?i)(fail|denied|error|invalid)"), "failed",
+    match(_raw, "(?i)(success|accepted|permit)"), "succeeded",
+    true(), "other")
+| bin _time span=1h
+| stats sum(eval(if(login_result="failed", 1, 0))) as failed_logins,
+    sum(eval(if(login_result="succeeded", 1, 0))) as successful_logins,
+    earliest(_time) as first, latest(_time) as last
+    by _time, host, src_ip
+| where failed_logins > 20
+| sort - failed_logins, - _time
