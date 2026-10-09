@@ -13,6 +13,7 @@ Hunting queries from my research, written for Microsoft Defender (`Device*` tabl
 | [dns-tunneling.kql](./queries/dns-tunneling.kql) | DNS tunneling | T1048.003 | [Hunting DNS tunneling](https://amitvijayan.com/journal/articles/hunting-dns-tunneling-and-data.html) |
 | [kerberoasting-rc4.kql](./queries/kerberoasting-rc4.kql) | Kerberoasting (RC4 tickets) | T1558.003 | [Hunting Kerberoasting](https://amitvijayan.com/journal/articles/hunting-kerberoasting-when-rc4-ticket.html) |
 | [compromised-mailbox-phishing.kql](./queries/compromised-mailbox-phishing.kql) | Compromised mailbox phishing | T1078, T1534 | [Daily Cyber Threat Brief — October 6, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-6-2026.html) |
+| [fortibleed-fortigate-admin-lockout.kql](./queries/fortibleed-fortigate-admin-lockout.kql) · [fortibleed-fortigate-admin-lockout.spl](./queries/splunk/fortibleed-fortigate-admin-lockout.spl) | FortiGate admin-account deletions and lockouts (FortiBleed) | T1190, T1078, T1562.001 | [Daily Cyber Threat Brief — October 9, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-9-2026.html) |
 
 ## Notes
 
