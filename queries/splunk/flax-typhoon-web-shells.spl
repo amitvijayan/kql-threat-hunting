@@ -1,0 +1,22 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-10-2026.html
+
+// -- Variant 1: web-server processes spawning OS command interpreters
+// (Sysmon EventCode 1: process creation)
+index=sysmon EventCode=1 earliest=-14d
+| eval parent=lower(ParentImage)
+| where match(parent, ".*(w3wp|httpd|nginx|apache2|tomcat|node)(\.exe)?$")
+| eval image=lower(Image)
+| where match(image, ".*(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|bash|sh|dash|python|perl|php|curl|wget)(\.exe)?$")
+| table _time, Computer, ParentImage, Image, CommandLine, User
+| sort - _time
+
+// -- Variant 2: new web-extension files dropped where the web service writes
+// (Sysmon EventCode 11: file create)
+index=sysmon EventCode=11 earliest=-14d
+| eval process=lower(Image)
+| where match(process, ".*(w3wp|httpd|nginx|apache2|tomcat|node)(\.exe)?$")
+| where match(lower(TargetFilename), ".*\.(jsp|jspx|php|aspx|ashx|asa|cer|war)$")
+| table _time, Computer, Image, TargetFilename, Hashes
+| sort - _time
