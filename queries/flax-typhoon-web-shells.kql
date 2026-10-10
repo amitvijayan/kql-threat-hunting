@@ -1,0 +1,53 @@
+// ============================================================================
+// Hunt: Web-shell activity on internet-facing servers — Flax Typhoon KEV wave
+// Context: On October 9, 2026, CISA added five vulnerabilities to the Known
+//   Exploited Vulnerabilities catalog after they were abused by the
+//   China-linked threat actor Flax Typhoon: CVE-2015-3306 (ProFTPD mod_copy
+//   improper access control, CVSS 10.0), CVE-2021-3199 (ONLYOFFICE Docs path
+//   traversal leading to RCE, CVSS 9.8), CVE-2023-22894 (Strapi cleartext
+//   storage of sensitive information, CVSS 7.2), and CVE-2016-3081
+//   (Apache Struts REST command injection, CVSS 8.1). Federal agencies were
+//   given an October 11 deadline. Flax Typhoon mines old, unpatched edge and
+//   web-application software; the standard post-exploitation move on these
+//   classes of bugs is to drop a web shell and spawn OS commands.
+// MITRE ATT&CK: T1190 (Exploit Public-Facing Application),
+//               T1505.003 (Server Software Component: Web Shell),
+//               T1059 (Command and Scripting Interpreter)
+// Data: Microsoft Defender - DeviceProcessEvents, DeviceFileEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-10-2026.html
+// Logic: web-server processes should never spawn shells or scripting
+// interpreters, and web-extension files should never appear in web roots
+// written by the web service itself.
+// ============================================================================
+
+// -- Variant 1: web-server processes spawning OS command interpreters
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where InitiatingProcessFileName in~ ("w3wp.exe", "httpd.exe", "nginx.exe",
+    "httpd", "apache2", "nginx", "tomcat9", "java", "node.exe", "node")
+| where FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe",
+    "cscript.exe", "mshta.exe", "rundll32.exe", "sh", "bash", "dash",
+    "python", "python3", "perl", "php", "curl", "wget")
+// tune: java/node parents are noisy in dev environments; exclude known-good hosts
+| project TimeGenerated, DeviceName, InitiatingProcessFileName,
+    FileName, ProcessCommandLine, AccountName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 2: new web-extension files dropped where the web service writes
+DeviceFileEvents
+| where TimeGenerated > ago(14d)
+| where ActionType == "FileCreated"
+| where InitiatingProcessFileName in~ ("w3wp.exe", "httpd.exe", "nginx.exe",
+    "httpd", "apache2", "nginx", "tomcat9", "java", "node.exe", "node")
+| where FileName endswith ".jsp" or FileName endswith ".jspx"
+    or FileName endswith ".php" or FileName endswith ".aspx"
+    or FileName endswith ".ashx" or FileName endswith ".asa"
+    or FileName endswith ".cer" // IIS executed .cer as ASP in old configs
+    or FileName endswith ".war"
+// focus on paths web servers actually serve
+| where FolderPath has "/www" or FolderPath has @"\inetpub"
+    or FolderPath has "/htdocs" or FolderPath has "/webapps"
+    or FolderPath has "/var/www" or FolderPath has "/usr/local/tomcat"
+| project TimeGenerated, DeviceName, FolderPath, FileName,
+    InitiatingProcessFileName, SHA256
+| order by TimeGenerated desc
