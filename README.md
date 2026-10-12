@@ -17,6 +17,14 @@ Hunting queries from my research, written for Microsoft Defender (`Device*` tabl
 | [flax-typhoon-web-shells.kql](./queries/flax-typhoon-web-shells.kql) · [flax-typhoon-web-shells.spl](./quer
 | [cve-2026-35273-oracle-peoplesoft.kql](./queries/cve-2026-35273-oracle-peoplesoft.kql) · [cve-2026-35273-oracle-peoplesoft.spl](./queries/splunk/cve-2026-35273-oracle-peoplesoft.spl) | Oracle PeopleSoft web-shell hunting (ShinyHunters CVE-2026-35273) | T1190, T1505.003, T1059 | [Daily Cyber Threat Brief — October 11, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-11-2026.html) |ies/splunk/flax-typhoon-web-shells.spl) | Web-shell footholds on internet-facing servers (Flax Typhoon KEV wave) | T1190, T1505.003, T1059 | [Daily Cyber Threat Brief — October 10, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-10-2026.html) |
 
+## Playbooks
+
+Step-by-step hunting playbooks using passive OSINT (Shodan, Censys, certificate transparency) — no scanning, index data only.
+
+| File | Technique | MITRE ATT&CK | Write-up |
+|---|---|---|---|
+| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan–Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
+
 ## Notes
 
 - Time windows (`ago(14d)` etc.) are starting points — tighten them to your environment.
