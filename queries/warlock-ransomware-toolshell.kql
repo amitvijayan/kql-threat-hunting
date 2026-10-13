@@ -1,0 +1,60 @@
+// ============================================================================
+// Hunt: Warlock ransomware TTPs — BYOVD K7RKScan driver, VS Code tunnel C2,
+//       ransomware staged in SYSVOL
+// Context: Per Symantec reporting in the October 12, 2026 brief, the
+//   China-linked Warlock operation (aka Longlegs / Storm-2603) breached at
+//   least four organizations (water utility, telecom, regional government,
+//   university) over two months ending Oct 1, 2026, reusing the on-premises
+//   SharePoint ToolShell chain (CVE-2025-49704, CVE-2025-49706,
+//   CVE-2025-53770, CVE-2025-53771 — 15 months patchable) alongside newer
+//   CVE-2026-45659 (now in CISA KEV). In one intrusion (Jul 22-31), a
+//   vulnerable K7RKScan driver (BYOVD) was used to kill endpoint protection
+//   on at least 40 hosts within about two hours; Warlock ransomware was
+//   then staged in the domain SYSVOL share and deployed to 33 hosts. The
+//   group also uses Visual Studio Code tunnels for command and control.
+// MITRE ATT&CK: T1190 (Exploit Public-Facing Application),
+//               T1562.001 (Impair Defenses: Disable or Modify Tools),
+//               T1572 (Protocol Tunneling),
+//               T1486 (Data Encrypted for Impact)
+// Data: Microsoft Defender - DeviceImageLoadEvents, DeviceProcessEvents,
+//       DeviceFileEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html
+// Logic: a driver named K7RKScan.sys should never load; 'code tunnel'
+//   command lines on hosts that should not run VS Code are the C2 staging
+//   Warlock used; executables landing in SYSVOL written by non-replication
+//   processes are the deployment vector.
+// ============================================================================
+
+// -- Variant 1: BYOVD — vulnerable K7RKScan driver loaded (EDR killer)
+DeviceImageLoadEvents
+| where TimeGenerated > ago(30d)
+| where FileName endswith "K7RKScan.sys"
+| project TimeGenerated, DeviceName, FileName, SHA256,
+          InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 2: VS Code tunnel used as C2 channel
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where ProcessCommandLine has "code tunnel"
+   or ProcessCommandLine has "code-tunnel"
+   or FileName =~ "code-tunnel.exe"
+| project TimeGenerated, DeviceName, AccountName, InitiatingProcessAccountName,
+          FileName, ProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 3: ransomware staged in the domain SYSVOL share
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where FolderPath has "SYSVOL"
+| where ActionType in ("FileCreated", "FileModified")
+| where FileName endswith ".exe" or FileName endswith ".ps1"
+   or FileName endswith ".bat" or FileName endswith ".msi"
+| summarize Writers = make_set(InitiatingProcessFileName, 10),
+            FileCount = count(),
+            Files = make_set(FileName, 20),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+    by DeviceName, FolderPath
+| where Writers !has "dfsr.exe"      // exclude legitimate DFS replication
+| order by LastSeen desc
