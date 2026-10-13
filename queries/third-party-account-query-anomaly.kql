@@ -1,0 +1,54 @@
+// ============================================================================
+// Hunt: abused third-party account with anomalous query / API volume
+// MITRE ATT&CK: T1078 (Valid Accounts), T1530 (Data from Cloud Storage)
+// Data: Microsoft Defender XDR - CloudAppEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-13-2026.html
+// Logic: Denmark's CPR registry breach (disclosed Oct 5, 2026) ran
+//        ~14M automated searches over ten days on a third party's valid
+//        account - and surfaced through an invoice, not a SIEM alert.
+//        A vendor account that suddenly reads millions of records is the
+//        tell. This hunt baselines daily per-account activity and flags
+//        large, sustained surges of read-type actions.
+// ============================================================================
+
+// -- Variant 1: daily per-account activity vs 14-day baseline
+let BaselineDays = 14d;
+let LookbackDays = 1d;
+let MinDailyActions = 10000;
+let SurgeRatio = 10.0;
+CloudAppEvents
+| where TimeGenerated > ago(BaselineDays + LookbackDays)
+| where isnotempty(AccountObjectId)
+| summarize DailyActions = count()
+    by AccountObjectId, AccountDisplayName, Day = startofday(TimeGenerated)
+| extend IsBaseline = Day < startofday(ago(LookbackDays))
+| summarize BaselineMedian = percentile_if(DailyActions, 50, IsBaseline),
+            BaselineMax = max_if(DailyActions, IsBaseline),
+            RecentActions = max_if(DailyActions, not(IsBaseline))
+        by AccountObjectId, AccountDisplayName
+| where RecentActions > MinDailyActions
+| extend SurgeVsMedian = toreal(RecentActions) / max(toreal(BaselineMedian), 1.0)
+| where SurgeVsMedian >= SurgeRatio
+| project AccountDisplayName, AccountObjectId, RecentActions,
+          BaselineMedian, BaselineMax, SurgeVsMedian
+| order by SurgeVsMedian desc
+
+// -- Variant 2: read-heavy data-harvest fingerprint within a single window
+CloudAppEvents
+| where TimeGenerated > ago(7d)
+| where isnotempty(AccountObjectId)
+| where ActionType has_any ("read", "query", "search", "get", "list",
+                            "download", "export")
+| summarize ReadActions = count(),
+            UniqueObjects = dcount(ObjectName),
+            ActionTypes = make_set(ActionType),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Countries = make_set(CountryCode),
+            IpAddresses = make_set(IPAddress)
+        by AccountObjectId, AccountDisplayName
+| where ReadActions > 50000 and UniqueObjects > 1000
+| extend SpanHours = (LastSeen - FirstSeen) / 1h
+| project AccountDisplayName, AccountObjectId, ReadActions, UniqueObjects,
+          ActionTypes, SpanHours, FirstSeen, LastSeen, Countries, IpAddresses
+| order by ReadActions desc
