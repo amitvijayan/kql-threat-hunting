@@ -1,0 +1,33 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html
+// Context: Warlock (aka Longlegs / Storm-2603) reusing the SharePoint
+//   ToolShell chain; used the K7RKScan BYOVD driver to kill EDR on 40+ hosts,
+//   VS Code tunnels for C2, and staged ransomware in the SYSVOL share.
+
+// -- Variant 1: BYOVD — vulnerable K7RKScan driver loaded (EDR killer)
+// (Sysmon EventCode 7: image loaded)
+index=sysmon EventCode=7 earliest=-30d
+| eval image=lower(ImageLoaded)
+| where match(image, ".*k7rkscan\\.sys$")
+| table _time, Computer, ImageLoaded, Signed, Signature, ProcessId, Image
+| sort - _time
+
+// -- Variant 2: VS Code tunnel used as C2 channel
+// (Sysmon EventCode 1: process creation)
+index=sysmon EventCode=1 earliest=-30d
+| eval cmd=lower(CommandLine)
+| where match(cmd, "code\\s+tunnel") OR match(cmd, "code-tunnel") OR match(lower(Image), ".*code-tunnel\\.exe$")
+| table _time, Computer, User, Image, ParentImage, CommandLine
+| sort - _time
+
+// -- Variant 3: ransomware staged in the domain SYSVOL share
+// (Sysmon EventCode 11: file create)
+index=sysmon EventCode=11 earliest=-30d
+| eval target=lower(TargetFilename)
+| where like(target, "%sysvol%")
+| where match(target, ".*\\.(exe|ps1|bat|msi)$")
+| eval writer=lower(Image)
+| where NOT match(writer, ".*dfsr\\.exe$")
+| table _time, Computer, Image, TargetFilename, Hashes
+| sort - _time
