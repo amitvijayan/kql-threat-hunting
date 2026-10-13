@@ -1,0 +1,24 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+// -- Variant 1: daily per-account activity vs 14-day baseline
+// (Denmark's CPR registry breach: ~14M automated searches over ten days
+// on a third party's valid account, caught by an invoice, not a SIEM.)
+index=YOUR_CLOUDAPP_INDEX earliest=-15d latest=-1d@d
+| bin _time span=1d as day
+| stats count as actions by AccountObjectId, AccountDisplayName, day
+| eventstats median(actions) as med_actions by AccountObjectId, AccountDisplayName
+| where day >= relative_time(now(), "-1d@d")
+| where actions > 10000 AND actions >= 10 * if(med_actions < 1, 1, med_actions)
+| table day, AccountDisplayName, AccountObjectId, actions, med_actions
+| sort 0 - actions
+
+// -- Variant 2: read-heavy data-harvest fingerprint
+index=YOUR_CLOUDAPP_INDEX earliest=-7d
+| where match(ActionType, "(?i)(read|query|search|get|list|download|export)")
+| stats count as reads, dc(ObjectName) as unique_objects,
+        values(ActionType) as actions, min(_time) as first, max(_time) as last,
+        values(CountryCode) as countries, values(IPAddress) as ips
+        by AccountObjectId, AccountDisplayName
+| where reads > 50000 AND unique_objects > 1000
+| sort 0 - reads
