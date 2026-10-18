@@ -1,0 +1,39 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Zero-click via ad bidding: the winning ad's JavaScript opens an invisible
+// 1x1-pixel frame to a validator server (mtrtb[.]com, published by Citizen Lab),
+// which vets the device before handing it to an exploit server - the ad networks
+// never see the payload. No user interaction, so hunt proxy/DNS logs, not users.
+
+// -- Variant 1: the published validator domain in DNS and proxy telemetry
+// (mtrtb[.]com - published by Citizen Lab, Oct 2026)
+index=YOUR_NETWORK_INDEX earliest=-30d
+| where match(url, "(?i)mtrtb(\.|com)")
+| stats count as hits, min(_time) as first_seen, max(_time) as last_seen,
+        values(query_type) as query_types
+        by host, url, dest_ip
+| sort 0 - hits
+
+// -- Variant 2: ad-serving contact, then a connection to a rarely-seen host
+// (the validator -> exploit-server handoff within 10 minutes)
+index=YOUR_NETWORK_INDEX earliest=-14d
+| where match(url, "(?i)(doubleclick|googlesyndication|adnxs|criteo|taboola|outbrain)")
+| eval ad_host=url, ad_time=_time
+| join type=inner host [
+    search index=YOUR_NETWORK_INDEX earliest=-14d
+    | eval second_host=url, second_time=_time ]
+| where second_time > ad_time AND second_time < ad_time + 600
+| stats count as hits, min(ad_time) as first_contact,
+        values(second_host) as second_hosts, dc(second_host) as second_host_count
+        by host, ad_host
+| sort 0 - second_host_count
+
+// -- Variant 3: browser spawning script/interpreter children after ad contact
+// (drive-by execution on Windows - the 45 Al Jazeera devices were Windows)
+index=YOUR_ENDPOINT_INDEX earliest=-14d
+| where match(parent_process, "(?i)(chrome\.exe|msedge\.exe|firefox\.exe|iexplore\.exe)")
+| where match(process, "(?i)(powershell|cmd\.exe|wscript|cscript|rundll32|mshta|regsvr32|dllhost)")
+| stats count as executions, min(_time) as first_seen, max(_time) as last_seen,
+        values(command_line) as cmd_samples
+        by host, parent_process, process
+| sort 0 - executions
