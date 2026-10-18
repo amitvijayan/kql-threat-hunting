@@ -1,0 +1,85 @@
+// ============================================================================
+// Hunt: "AdFection" - zero-click Candiru spyware delivered via targeted ads
+// MITRE ATT&CK: T1189 (Drive-by Compromise)
+// Data: Microsoft Defender - DeviceNetworkEvents (DNS + URL visits),
+//        DeviceProcessEvents (post-delivery behavior)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-17-2026.html
+// Logic: Citizen Lab (Oct 15, 2026) confirmed the first public case of
+//        zero-click mercenary spyware delivered through real-time ad
+//        bidding. Israeli ad firm Discover-Tech profiled devices via its
+//        "Controlium" platform and served ads whose JavaScript opened an
+//        invisible 1x1-pixel frame to a Candiru validator server
+//        (reportedly operating as Integrity Labs after an acquisition),
+//        which vetted the device before handing it to an exploit server -
+//        so the ad networks never saw the malicious payload. Published
+//        IoC: the validator domain mtrtb[.]com (Citizen Lab also published
+//        a SHA-256 indicator not included here - pull it from the report).
+//        45 Windows devices at Al Jazeera were compromised in 2024-2025.
+//        Hunt the published validator domain in DNS/proxy telemetry, then
+//        look for the telltale post-contact behavior: a browser that
+//        silently spawned a new process or reached a second, unknown host
+//        right after touching the validator - the handoff to the exploit
+//        server. No user interaction is involved, so user-awareness
+//        training is NOT the mitigation; proxy/DNS logging is.
+// ============================================================================
+
+// -- Variant 1: the published validator domain in DNS and URL telemetry
+let ValidatorDomain = "mtrtb.com";
+DeviceNetworkEvents
+| where TimeGenerated > ago(30d)
+// DNS lookups of the validator
+| where (ActionType == "DnsQuery" and RemoteUrl has "mtrtb")
+   or (RemoteUrl has ValidatorDomain)
+| extend ResolvedIP = RemoteIP
+| summarize FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Hits = count(),
+            QueryTypes = make_set(ActionType)
+    by DeviceName, RemoteUrl, ResolvedIP
+| order by Hits desc
+
+// -- Variant 2: browser touches an ad-serving host, then silently opens a
+//    connection to a SECOND rarely-seen host (the validator -> exploit-server handoff)
+let Lookback = 14d;
+let AdTerms = dynamic(["doubleclick", "googlesyndication", "adnxs", "criteo", "taboola", "outbrain"]);
+DeviceNetworkEvents
+| where TimeGenerated > ago(Lookback)
+| where RemoteUrl has_any (AdTerms)
+| project DeviceName, TimeGenerated, AdHost = RemoteUrl
+| join kind=inner (
+    DeviceNetworkEvents
+    | where TimeGenerated > ago(Lookback)
+    | where isnotempty(RemoteUrl)
+    | where ActionType in ("ConnectionSuccess", "DnsQuery")
+) on DeviceName
+| where TimeGenerated1 > TimeGenerated and TimeGenerated1 < TimeGenerated + 10m
+| summarize FirstContact = min(TimeGenerated),
+            SecondHosts = make_set(RemoteUrl1, 20),
+            SecondHostCount = dcount(RemoteUrl1)
+    by DeviceName, AdHost
+// flag only when the follow-on hosts were NOT seen in the first 7 days of lookback
+| join kind=inner (
+    DeviceNetworkEvents
+    | where TimeGenerated > ago(Lookback)
+    | where TimeGenerated < ago(Lookback - 7d)
+    | summarize BaselineHosts = make_set(RemoteUrl) by DeviceName
+) on DeviceName
+| extend NovelHosts = set_difference(SecondHosts, BaselineHosts)
+| where array_length(NovelHosts) > 0
+| project DeviceName, AdHost, FirstContact, NovelHosts
+| order by array_length(NovelHosts) desc
+
+// -- Variant 3: browser spawns an unexpected child process after ad-serving
+//    contact (drive-by execution on Windows - the 45 Al Jazeera devices were Windows)
+let BrowserPaths = dynamic(["chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe"]);
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where InitiatingProcessFileName in (BrowserPaths)
+| where ProcessCommandLine has_any ("powershell", "cmd.exe", "wscript", "cscript",
+                                    "rundll32", "mshta", "regsvr32", "dllhost")
+| summarize FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Executions = count(),
+            CmdSamples = make_set(ProcessCommandLine, 5)
+    by DeviceName, InitiatingProcessFileName, FileName
+| order by Executions desc
