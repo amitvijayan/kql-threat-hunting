@@ -30,7 +30,7 @@ Step-by-step hunting playbooks using passive OSINT (Shodan, Censys, certificate 
 
 | File | Technique | MITRE ATT&CK | Write-up |
 |---|---|---|---|
-| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan-Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
+| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan–Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
 
 ## Notes
 
