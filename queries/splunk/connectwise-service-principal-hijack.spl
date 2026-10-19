@@ -1,0 +1,29 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index/sourcetype names with your own. Same logic, same write-ups.
+// Assumes Entra sign-in and audit logs land in Splunk (e.g. Splunk Add-on for
+// Microsoft Cloud Services / Azure Event Hub sourcetypes).
+
+// -- Variant 1: scripted sign-ins on vendor service principals
+// (mid-Oct 2026: ConnectWise/SkyKick app signed in from 144.172.64[.]128 with
+// a curl/7.88.1 user agent - scripted agents from a first-seen IP, not the
+// vendor's usual egress range.)
+index=YOUR_ENTRA_INDEX sourcetype=YOUR_SIGNIN_SOURCETYPE earliest=-30d
+(appDisplayName="*SkyKick*" OR appDisplayName="*Cloud Backup*" OR appDisplayName="*ConnectWise*")
+status.errorCode=0
+| bin _time span=1d
+| stats dc(ipAddress) as ip_count values(ipAddress) as IPs values(userAgent) as UAs
+        values(country) as countries count as signins by appDisplayName, servicePrincipalId, _time
+| where match(UAs, "(?i)curl|python|powershell") OR ip_count=1
+| sort 0 - _time
+
+// -- Variant 2: service-principal role self-grants (T1098) and credential adds
+// (Huntress: hijacked apps granted themselves Exchange Administrator on ~50
+// tenants; persistence via "Add service principal credentials". A vendor app
+// appearing in BOTH searches is your incident.)
+index=YOUR_ENTRA_INDEX sourcetype=YOUR_AUDIT_SOURCETYPE earliest=-30d
+(operationName="Add member to role" OR operationName="Add service principal credentials")
+| eval init_app='initiatedBy.app.displayName', target='targetResources{}.displayName'
+| where isnotnull(init_app)
+| stats earliest(_time) as first_seen latest(_time) as last_seen count as ops
+        values(target) as targets by operationName, init_app
+| sort 0 - ops
