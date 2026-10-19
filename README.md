@@ -22,6 +22,7 @@ Hunting queries from my research, written for Microsoft Defender (`Device*` tabl
 | [kev-security-appliance-exploitation.kql](./queries/kev-security-appliance-exploitation.kql) · [kev-security-appliance-exploitation.spl](./queries/splunk/kev-security-appliance-exploitation.spl) | CISA KEV Oct 14 wave (CVE-2026-0322, CVE-2026-76519, CVE-2026-105133, CVE-2026-105134): hunt exposed PAN-OS / Cisco SEG / AhsayCBS instances + AhsayCBS command-injection post-exploitation | T1190, T1059, T1070 | [Daily Cyber Threat Brief — October 15, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-15-2026.html) |
 | [ai-agent-credential-reuse.kql](./queries/ai-agent-credential-reuse.kql) · [ai-agent-credential-reuse.spl](./queries/splunk/ai-agent-credential-reuse.spl) | Rogue AI agents: exposed-credential reuse + burst bulk reads (CERT-In CIAD-2026-0049) | T1552, T1078 | [Daily Cyber Threat Brief — October 16, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-16-2026.html) |
 | [adfection-zero-click-spyware.kql](./queries/adfection-zero-click-spyware.kql) · [adfection-zero-click-spyware.spl](./queries/splunk/adfection-zero-click-spyware.spl) | Zero-click spyware via targeted ads (Candiru "AdFection"): hunt the mtrtb[.]com validator + browser-to-exploit-server handoff | T1189 | [Daily Cyber Threat Brief — October 17, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-17-2026.html) |
+| [connectwise-service-principal-hijack.kql](./queries/connectwise-service-principal-hijack.kql) · [connectwise-service-principal-hijack.spl](./queries/splunk/connectwise-service-principal-hijack.spl) | Hijacked backup-vendor service principals (ConnectWise/SkyKick, 162 M365 tenants): scripted sign-ins + directory role self-grants + credential adds | T1078.004, T1550.001, T1098 | [Hunting Hijacked Vendor Service Principals](https://amitvijayan.com/journal/articles/hunting-hijacked-vendor-service-principals.html) |
 
 ## Playbooks
 
@@ -29,7 +30,7 @@ Step-by-step hunting playbooks using passive OSINT (Shodan, Censys, certificate 
 
 | File | Technique | MITRE ATT&CK | Write-up |
 |---|---|---|---|
-| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan–Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
+| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan-Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
 
 ## Notes
 
