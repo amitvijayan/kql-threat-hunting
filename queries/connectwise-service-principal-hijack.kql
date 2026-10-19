@@ -1,0 +1,67 @@
+// ============================================================================
+// Hunt: hijacked third-party service principals (ConnectWise/SkyKick backup app)
+// MITRE ATT&CK: T1078.004 (Valid Accounts: Cloud Accounts),
+//               T1550.001 (Use Alternate Authentication Material:
+//                          Application Access Token),
+//               T1098 (Account Manipulation)
+// Data: Microsoft Defender XDR - AADSignInEventsBeta, AuditLogs
+// Write-up: https://amitvijayan.com/journal/articles/hunting-hijacked-vendor-service-principals.html
+// Logic: mid-October 2026, attackers stole the application secrets behind
+//        ConnectWise Cloud Backup (the former SkyKick Cloud Backup) and
+//        signed directly into at least 162 customer Microsoft 365 tenants
+//        as the backup app itself - no phishing, no malware, no MFA prompt.
+//        Huntress observed scripted sign-ins from a single IP
+//        (144.172.64[.]128) with a curl/7.88.1 user agent across Oct 13-14,
+//        then the hijacked service principals granting themselves directory
+//        roles (Exchange Administrator on nearly 50 tenants; one Global
+//        Administrator via Cloud Management - MS Teams) and adding fresh
+//        credentials to apps for persistence - in one tenant, sign-in to
+//        persistence took about five minutes. ConnectWise shut Cloud Backup
+//        off on Oct 17, but planted credentials survive the shutdown. These
+//        three hunts surface the pattern: scripted sign-in fingerprints on
+//        vendor apps, role self-grants, credential adds. Pull your real
+//        vendor service-principal display names from the Entra portal and
+//        bake them into the VendorApps list.
+// ============================================================================
+
+// -- Variant 1: vendor service principal signing in with a scripted fingerprint
+let Lookback = 30d;
+let VendorApps = dynamic(["SkyKick", "Cloud Backup", "ConnectWise"]);
+AADSignInEventsBeta
+| where Timestamp > ago(Lookback)
+| where AppDisplayName has_any (VendorApps) or ServicePrincipalName has_any (VendorApps)
+| where ErrorCode == 0
+| summarize Signins = count(),
+            Countries = make_set(Country),
+            IPs = make_set(IPAddress),
+            UserAgents = make_set(UserAgent),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp)
+    by AppDisplayName, ServicePrincipalId, bin(Timestamp, 1d)
+| where UserAgents has_any ("curl", "python", "powershell") or array_length(IPs) == 1
+| order by Timestamp desc
+
+// -- Variant 2: service principal granting directory roles to itself (T1098)
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == "Add member to role"
+| extend InitiatedByApp = tostring(parse_json(InitiatedBy).app.displayName)
+| extend TargetApp = tostring(parse_json(TargetResources)[0].displayName)
+| where isnotempty(InitiatedByApp)
+| where RoleDisplayName has_any ("Exchange Administrator", "Global Administrator",
+    "Privileged Authentication Administrator", "User Administrator")
+| project TimeGenerated, RoleDisplayName, InitiatedByApp, TargetApp, IpAddress,
+    ServicePrincipalId = tostring(parse_json(InitiatedBy).app.servicePrincipalId)
+| order by TimeGenerated desc
+
+// -- Variant 3: credential adds to service principals / applications (persistence)
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName has_any ("Add service principal credentials",
+    "Update application – certificates and secrets management",
+    "Add application owner")
+| extend InitiatedByApp = tostring(parse_json(InitiatedBy).app.displayName)
+| extend InitiatedByUser = tostring(parse_json(InitiatedBy).user.userPrincipalName)
+| extend Target = tostring(parse_json(TargetResources)[0].displayName)
+| project TimeGenerated, OperationName, InitiatedByApp, InitiatedByUser, Target, IpAddress
+| order by TimeGenerated desc
