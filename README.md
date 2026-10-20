@@ -23,6 +23,7 @@ Hunting queries from my research, written for Microsoft Defender (`Device*` tabl
 | [ai-agent-credential-reuse.kql](./queries/ai-agent-credential-reuse.kql) · [ai-agent-credential-reuse.spl](./queries/splunk/ai-agent-credential-reuse.spl) | Rogue AI agents: exposed-credential reuse + burst bulk reads (CERT-In CIAD-2026-0049) | T1552, T1078 | [Daily Cyber Threat Brief — October 16, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-16-2026.html) |
 | [adfection-zero-click-spyware.kql](./queries/adfection-zero-click-spyware.kql) · [adfection-zero-click-spyware.spl](./queries/splunk/adfection-zero-click-spyware.spl) | Zero-click spyware via targeted ads (Candiru "AdFection"): hunt the mtrtb[.]com validator + browser-to-exploit-server handoff | T1189 | [Daily Cyber Threat Brief — October 17, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-17-2026.html) |
 | [connectwise-service-principal-hijack.kql](./queries/connectwise-service-principal-hijack.kql) · [connectwise-service-principal-hijack.spl](./queries/splunk/connectwise-service-principal-hijack.spl) | Hijacked backup-vendor service principals (ConnectWise/SkyKick, 162 M365 tenants): scripted sign-ins + directory role self-grants + credential adds | T1078.004, T1550.001, T1098 | [Hunting Hijacked Vendor Service Principals](https://amitvijayan.com/journal/articles/hunting-hijacked-vendor-service-principals.html) |
+| [ovhcloud-cli-supply-chain-backdoor.kql](./queries/ovhcloud-cli-supply-chain-backdoor.kql) · [ovhcloud-cli-supply-chain-backdoor.spl](./queries/splunk/ovhcloud-cli-supply-chain-backdoor.spl) | OVHcloud CLI supply-chain backdoor (poisoned releases v0.11.0-v0.15.0) | T1195.002, T1005 | [Daily Cyber Threat Brief — October 20, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-20-2026.html) |
 
 ## Playbooks
 
@@ -30,10 +31,10 @@ Step-by-step hunting playbooks using passive OSINT (Shodan, Censys, certificate 
 
 | File | Technique | MITRE ATT&CK | Write-up |
 |---|---|---|---|
-| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan–Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
+| [osint-japan-korea-breach-wave.md](./playbooks/osint-japan-korea-breach-wave.md) | OSINT hunt for exposed Metabase/SharePoint behind the Japan-Korea breach wave | T1595, T1596, T1190 | [Daily Cyber Threat Brief — October 12, 2026](https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-12-2026.html) |
 
 ## Notes
 
-- Time windows (`ago(14d)` etc.) are starting points — tighten them to your environment.
+- Time windows (`ago(14d)` etc.) are starting points – tighten them to your environment.
 - Thresholds (scores, counts) are tuned for signal over noise; expect to baseline them.
 - All queries are my own work, published under MIT. No employer data, ever.
