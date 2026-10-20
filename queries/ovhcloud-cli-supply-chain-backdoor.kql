@@ -1,0 +1,76 @@
+// ============================================================================
+// Hunt: OVHcloud CLI supply-chain backdoor (October 2026)
+// MITRE ATT&CK: T1195.002 (Supply Chain Compromise: Compromise Software Supply
+//               Chain), T1005 (Data from Local System)
+// Data: Microsoft Defender - DeviceFileEvents, DeviceProcessEvents,
+//       DeviceNetworkEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-20-2026.html
+// Logic: an attacker hijacked a developer's GitHub account, disabled release
+// immutability on the OVHcloud CLI repository, and swapped in poisoned builds
+// of releases v0.11.0-v0.15.0 - the CI/CD pipeline tested clean code while the
+// shipped artifacts were trojaned. The tampered release was live from Oct 19
+// 14:47 to 16:21 (a 94-minute window; times as reported - OVHcloud is
+// France-based so likely CEST, confirm for your fleet). The malware is an
+// infostealer that retrieves secrets from disk; anyone exposed must treat it
+// as a credential-burn event. Versions v0.10.0 and earlier, and the fresh
+// v0.16.0, are clean.
+//   Hunt 1 flags CLI binaries that landed on disk inside the poisoned window.
+//   Hunt 2 flags low-prevalence CLI-binary hashes across the fleet - the
+//   poisoned artifacts differ from the legitimately built ones, so verify any
+//   outlier SHA against the hashes OVHcloud publishes for v0.16.0.
+//   Hunt 3 flags the CLI process with outbound connections or spawned child
+//   processes, the infostealer's post-execution footprint. (The CLI legitimately
+//   phones home to OVHcloud APIs, so treat Hunt 3 hits as pivots, not verdicts.)
+// Adjust CliNamePattern to the CLI binary name in your fleet.
+// ============================================================================
+let PoisonedStart = datetime(2026-10-19 14:47);
+let PoisonedEnd = datetime(2026-10-19 16:21);
+let CliNamePattern = "ovh";
+
+// -- Hunt 1: CLI binary written to disk during the 94-minute poisoned window
+DeviceFileEvents
+| where TimeGenerated between (PoisonedStart .. PoisonedEnd)
+| where FileName has CliNamePattern
+| where FileName has_any (".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".tar", ".gz", ".zip")
+| where ActionType has_any ("FileCreated", "FileModified", "FileMovedIn", "FileWrite")
+| project TimeGenerated, DeviceName, FileName, FolderPath, ActionType,
+          InitiatingProcessFileName, InitiatingProcessCommandLine, SHA256
+| order by TimeGenerated desc
+;
+
+// -- Hunt 2: low-prevalence CLI hashes across the fleet (poisoned vs clean)
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName has CliNamePattern
+| where isnotempty(SHA256)
+| summarize Devices = dcount(DeviceId),
+            Executions = count(),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by SHA256, FileName
+| where Devices <= 2          // scale to fleet size; investigate anything rare
+| order by Devices asc, Executions desc
+;
+
+// -- Hunt 3: CLI process with outbound connections or spawned child processes
+let CliNet = DeviceNetworkEvents
+| where TimeGenerated > ago(14d)
+| where InitiatingProcessFileName has CliNamePattern
+| summarize DistinctRemotes = dcount(RemoteIP),
+            Connections = count(),
+            Remotes = make_set(RemoteIP, 25)
+            by DeviceId, CliProc = InitiatingProcessFileName;
+let CliKids = DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where InitiatingProcessFileName has CliNamePattern
+| where FileName !has CliNamePattern
+| summarize SpawnEvents = count(),
+            ChildProcs = make_set(FileName, 25)
+            by DeviceId, CliProc = InitiatingProcessFileName;
+CliNet
+| join kind=fullouter CliKids on DeviceId, CliProc
+| extend DeviceName = coalesce(DeviceName, DeviceName1)
+| project DeviceId, DeviceName, CliProc,
+          DistinctRemotes, Connections, Remotes,
+          SpawnEvents, ChildProcs
+| order by DistinctRemotes desc
