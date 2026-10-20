@@ -1,0 +1,32 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+
+// -- Hunt 1: CLI binary written to disk during the 94-minute poisoned window
+// (Oct 19, 2026 14:47-16:21; verify timezone for your fleet)
+index=sysmon EventCode=11 TargetFilename="*ovh*"
+    (TargetFilename="*.exe" OR TargetFilename="*.msi" OR TargetFilename="*.dmg"
+     OR TargetFilename="*.pkg" OR TargetFilename="*.deb" OR TargetFilename="*.rpm"
+     OR TargetFilename="*.tar" OR TargetFilename="*.gz" OR TargetFilename="*.zip")
+    _time>=2026-10-19T14:47:00 _time<=2026-10-19T16:21:00
+| table _time, Computer, TargetFilename, Image, Hashes
+| sort - _time
+
+// -- Hunt 2: low-prevalence CLI hashes across the fleet (poisoned vs clean)
+index=sysmon EventCode=1 Image="*ovh*" Hashes="*SHA256=*"
+| rex field=Hashes "SHA256=(?<sha256>[A-F0-9]+)"
+| stats dc(Computer) as devices, count as executions,
+        min(_time) as first, max(_time) as last by sha256, Image
+| where devices <= 2
+| sort devices, - executions
+| table sha256, Image, devices, executions, first, last
+
+// -- Hunt 3: CLI process with outbound connections or spawned child processes
+index=sysmon EventCode=3 Image="*ovh*" earliest=-14d
+| stats dc(DestinationIp) as distinct_remotes, count as connections,
+        values(DestinationIp) as remotes by Computer, Image
+| join type=left Computer
+    [ search index=sysmon EventCode=1 ParentImage="*ovh*" Image!="*ovh*"
+      earliest=-14d
+    | stats count as spawn_events, values(Image) as child_procs by Computer ]
+| sort - distinct_remotes
+| table Computer, Image, distinct_remotes, connections, remotes, spawn_events, child_procs
