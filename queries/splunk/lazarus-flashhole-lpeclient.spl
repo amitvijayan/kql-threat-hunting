@@ -1,0 +1,48 @@
+// ============================================================================
+// Splunk SPL equivalents for the Lazarus FlashHole hunts.
+// Replace the index names with your own. Same logic, same write-up:
+// https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-22-2026.html
+// Kaspersky GReAT (Oct 21, 2026): Lazarus "FlashHole" campaign, active since
+// July 2025 vs. South Korean orgs — fsquirt.exe proxy-execution, GitHub
+// staging (TechHub), Dropbox C2 (ClientHub), Chromium credential theft,
+// LPEClient with ML-KEM-1024 encrypted C2.
+// ============================================================================
+
+-- Variant 1: fsquirt.exe spawning child processes (proxy-execution)
+index=wineventlog (EventCode=1 OR EventCode=4688) ParentImage="*\\fsquirt.exe"
+| stats count as child_starts, values(Image) as child_names,
+        values(CommandLine) as child_commands, min(_time) as first, max(_time) as last
+        by host, ParentProcessId
+| sort - child_starts
+| table host, ParentProcessId, child_starts, child_names, child_commands, first, last
+
+-- Variant 2: GitHub-bound egress from unexpected processes
+index=proxy (url="*github.com*" OR url="*raw.githubusercontent.com*")
+    process_name NOT IN ("chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe",
+                         "git.exe", "gh.exe", "vscode.exe", "code.exe",
+                         "sourcetree.exe", "gitkraken.exe", "tortoisegitproc.exe")
+| stats count as connections, values(url) as urls, min(_time) as first, max(_time) as last
+        by host, process_name, process_path
+| where connections >= 3
+| sort - connections
+| table host, process_name, process_path, connections, urls, first, last
+
+-- Variant 3: Dropbox egress from unexpected processes
+index=proxy (url="*dropbox.com*" OR url="*dropboxusercontent.com*")
+    process_name NOT IN ("dropbox.exe", "dropboxupdate.exe", "chrome.exe",
+                         "msedge.exe", "firefox.exe", "iexplore.exe")
+| stats count as connections, values(url) as urls, min(_time) as first, max(_time) as last
+        by host, process_name, process_path
+| where connections >= 3
+| sort - connections
+| table host, process_name, process_path, connections, urls, first, last
+
+-- Variant 4: Chromium "Login Data" touched by non-browser processes
+index=wineventlog (EventCode=1 OR EventCode=4663) ObjectName="*Login Data"
+    Process_Name NOT IN ("chrome.exe", "msedge.exe", "brave.exe", "opera.exe",
+                         "vivaldi.exe", "whale.exe")
+| stats count as events, values(EventCode) as event_codes,
+        min(_time) as first, max(_time) as last
+        by host, Process_Name
+| sort - events
+| table host, Process_Name, events, event_codes, first, last
