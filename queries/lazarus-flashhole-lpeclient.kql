@@ -1,0 +1,104 @@
+// ============================================================================
+// Hunt: Lazarus "FlashHole" campaign — trusted-tool proxying, GitHub/Dropbox
+//   staging, and Chromium credential theft (Kaspersky GReAT, Oct 21, 2026)
+// Context: North Korea's Lazarus Group has run "FlashHole" since at least
+//   July 2025 against South Korean software, construction, and
+//   wire-communications manufacturing orgs. Initial access is targeted
+//   phishing pointing to AI-generated CV/portfolio lure sites; the chain
+//   then moves through private GitHub repos. Standout tradecraft: INISAFE
+//   CrossWeb EX is abused to proxy shellcode execution through the
+//   legitimate fsquirt.exe binary; the TechHub downloader pulls malware
+//   from GitHub; ClientHub beacons to Dropbox; the Cubridge modular
+//   backdoor does file management, command execution, recon, and
+//   screenshots; Chromium-browser credentials are harvested. The updated
+//   LPEClient backdoor encrypts C2 with ML-KEM-1024 (post-quantum) before
+//   downloading payloads in memory — so the hunt must live in the process
+//   chain, not in decryptable traffic.
+// MITRE ATT&CK: T1566.002 (Spearphishing Link),
+//               T1218 (System Binary Proxy Execution - fsquirt.exe),
+//               T1573 (Encrypted Channel - ML-KEM-1024 C2),
+//               T1555.003 (Credentials from Web Browsers),
+//               T1059 (Command and Scripting Interpreter - Cubridge)
+// Data: Microsoft Defender - DeviceProcessEvents, DeviceNetworkEvents,
+//       DeviceFileEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-22-2026.html
+// Logic: fsquirt.exe (a Bluetooth file-transfer wizard) never legitimately
+//   spawns child processes; GitHub/Dropbox egress from processes that are
+//   neither browsers, git clients, nor sync agents is the TechHub/ClientHub
+//   pattern; reads of Chromium "Login Data" by anything but the browser are
+//   the credential-theft step. Baseline the allow-lists for your estate.
+// ============================================================================
+
+// -- Variant 1: fsquirt.exe spawning child processes (proxy-execution)
+// fsquirt.exe is the FlashHole proxy-execution binary per Kaspersky: it
+// exists to pair Bluetooth devices, not to run shellcode or launch tools.
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where InitiatingProcessFileName =~ "fsquirt.exe"
+// re-entrancy of the wizard itself is possible; children are the anomaly
+| summarize ChildStarts = count(),
+            ChildNames = make_set(FileName, 25),
+            ChildCommands = make_set(ProcessCommandLine, 25),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by DeviceName, InitiatingProcessId
+| project DeviceName, InitiatingProcessId, ChildStarts, ChildNames,
+          ChildCommands, FirstSeen, LastSeen
+| order by ChildStarts desc
+
+// -- Variant 2: GitHub-bound egress from unexpected processes
+// The TechHub downloader pulls malware from GitHub in the FlashHole chain.
+// Browsers, git clients, and IDEs legitimately reach github.com; a new or
+// unusual binary doing so is worth a look.
+DeviceNetworkEvents
+| where TimeGenerated > ago(14d)
+| where RemoteUrl has_any ("github.com", "raw.githubusercontent.com")
+| where InitiatingProcessFileName !in~ ("chrome.exe", "msedge.exe",
+    "firefox.exe", "iexplore.exe", "git.exe", "gh.exe", "vscode.exe",
+    "code.exe", "sourcetree.exe", "gitkraken.exe", "tortoisegitproc.exe")
+| summarize Connections = count(),
+            Urls = make_set(RemoteUrl, 25),
+            Ports = make_set(RemotePort, 10),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath
+| where Connections >= 3
+| project DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath,
+          Connections, Ports, Urls, FirstSeen, LastSeen
+| order by Connections desc
+
+// -- Variant 3: Dropbox egress from unexpected processes
+// ClientHub beacons to Dropbox in the FlashHole toolset. The Dropbox sync
+// client and browsers reach dropbox.com legitimately; odd processes do not.
+DeviceNetworkEvents
+| where TimeGenerated > ago(14d)
+| where RemoteUrl has_any ("dropbox.com", "dropboxusercontent.com")
+| where InitiatingProcessFileName !in~ ("dropbox.exe", "dropboxupdate.exe",
+    "chrome.exe", "msedge.exe", "firefox.exe", "iexplore.exe")
+| summarize Connections = count(),
+            Urls = make_set(RemoteUrl, 25),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath
+| where Connections >= 3
+| project DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath,
+          Connections, Urls, FirstSeen, LastSeen
+| order by Connections desc
+
+// -- Variant 4: Chromium "Login Data" touched by non-browser processes
+// FlashHole's credential-theft step targets Chromium-browser credential
+// stores. Only the browser itself should be touching Login Data.
+DeviceFileEvents
+| where TimeGenerated > ago(14d)
+| where FileName =~ "Login Data"
+| where InitiatingProcessFileName !in~ ("chrome.exe", "msedge.exe",
+    "brave.exe", "opera.exe", "vivaldi.exe", "whale.exe")
+| summarize Events = count(),
+            Actions = make_set(ActionType, 10),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated)
+            by DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath,
+               FolderPath
+| project DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath,
+          FolderPath, Events, Actions, FirstSeen, LastSeen
+| order by Events desc
