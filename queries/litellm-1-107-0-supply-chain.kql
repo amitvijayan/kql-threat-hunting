@@ -1,0 +1,88 @@
+// ============================================================================
+// Hunt: LiteLLM 1.107.0 supply-chain compromise — trojaned PyPI/Docker
+//   release shipped through a hijacked release pipeline (Oct 21, 2026)
+// Context: On Oct 21, 2026, attackers used stolen GitHub CLI OAuth tokens
+//   from three LiteLLM engineers' accounts to run the project's release
+//   workflow against a lookalike repository (Berri-AI/litellm, one hyphen
+//   away from the legitimate fork) and publish version 1.107.0. One token
+//   launched the pipeline, a second approved it, a third deleted the
+//   workflow records. LiteLLM believes the tokens were lifted from logs
+//   in an internet-exposed internal deployment. All seven PyPI wheels
+//   were live 11:39-13:23 UTC; Docker Hub and GHCR tags (v1.107.0,
+//   latest, main-latest, main-stable) served the tainted build from
+//   11:46 UTC, with GHCR pulled by 13:51 UTC and Docker Hub repointed by
+//   14:20 UTC. The malicious build steals credentials — cloud logins,
+//   developer secrets, AI service keys, browser passwords, and LiteLLM
+//   proxy database contents — and loads remote-code execution tooling.
+//   Wiz researchers report stolen AWS credentials were tested against
+//   Amazon Bedrock within hours. Last safe version is 1.106.2; anyone
+//   who installed 1.107.0 or pulled those tags on Oct 21 should treat
+//   the host as compromised, rebuild from a clean image, and rotate
+//   every secret the process could read. This is LiteLLM's second
+//   supply-chain compromise of 2026 (1.82.7/1.82.8 were the first).
+// MITRE ATT&CK: T1195.002 (Supply Chain Compromise: Compromise Software
+//               Supply Chain), T1078 (Valid Accounts - stolen GitHub
+//               OAuth tokens), T1555.003 (Credentials from Web Browsers)
+// Data: Microsoft Defender - DeviceProcessEvents, DeviceFileEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-24-2026.html
+// Logic: version 1.107.0 is trojaned wherever it appears, so any pip
+//   install naming litellm 1.107.0 is a hit, not a version-drift alert.
+//   The floating Docker tags (latest, main-latest, main-stable) are only
+//   incriminating inside the Oct 21 taint window, so that variant is
+//   time-boxed. The post-install variant hunts the stealer's own
+//   behavior: a Python/LiteLLM process reading browser credential stores
+//   or spawning a shell.
+// ============================================================================
+
+// -- Variant 1: pip install of trojaned litellm 1.107.0
+// Any host that installed litellm==1.107.0 picked up the credential
+// stealer. Match on the installer (pip, pip3, uv, python -m pip) plus
+// both the package name and the exact trojaned version in the command.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName in~ ("pip.exe", "pip3.exe", "uv.exe", "python.exe", "pythonw.exe", "py.exe")
+| where ProcessCommandLine has "litellm" and ProcessCommandLine has "1.107.0"
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 2: Docker pull/run of tainted LiteLLM tags in the Oct 21 window
+// v1.107.0 is always trojaned; the floating tags (latest, main-latest,
+// main-stable) served the tainted build only 11:46-14:20 UTC on Oct 21,
+// so floating-tag matches are time-boxed to that window to avoid flagging
+// legitimate later pulls of the same tag names.
+DeviceProcessEvents
+| where FileName =~ "docker.exe"
+| where ProcessCommandLine has "litellm"
+| extend IsPinnedBadVersion = ProcessCommandLine has "1.107.0",
+         IsFloatingTagInWindow = (ProcessCommandLine has_any ("latest", "main-latest", "main-stable")
+             and TimeGenerated between (datetime(2026-10-21T11:46:00Z) .. datetime(2026-10-21T14:20:00Z)))
+| where IsPinnedBadVersion or IsFloatingTagInWindow
+| project TimeGenerated, DeviceName, ProcessCommandLine,
+    InitiatingProcessFileName, AccountName, IsPinnedBadVersion, IsFloatingTagInWindow
+| order by TimeGenerated desc
+
+// -- Variant 3a: Python/LiteLLM process reading Chromium "Login Data"
+// The 1.107.0 payload steals browser passwords. Only the browser itself
+// should touch Login Data; a litellm-invoking Python process doing so is
+// the stealer executing.
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "Login Data"
+| where InitiatingProcessFileName in~ ("python.exe", "pythonw.exe")
+| where InitiatingProcessCommandLine has "litellm"
+| project TimeGenerated, DeviceName, FolderPath, FileName,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountName
+| order by TimeGenerated desc
+
+// -- Variant 3b: shell spawned by a litellm-invoking Python process
+// The payload also loads remote-code execution tooling. A shell child of
+// a Python process that was invoked for litellm is that tooling running.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "sh", "bash")
+| where InitiatingProcessFileName in~ ("python.exe", "pythonw.exe")
+| where InitiatingProcessCommandLine has "litellm"
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
