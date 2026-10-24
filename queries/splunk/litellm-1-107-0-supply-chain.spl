@@ -1,0 +1,37 @@
+// ============================================================================
+// Splunk SPL equivalents for the LiteLLM 1.107.0 supply-chain hunts.
+// Replace the index names with your own. Same logic, same write-up:
+// https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-24-2026.html
+// Oct 21, 2026: attackers used stolen GitHub CLI OAuth tokens to publish
+// trojaned LiteLLM 1.107.0 to PyPI (wheels live 11:39-13:23 UTC) and
+// Docker Hub/GHCR (tags v1.107.0, latest, main-latest, main-stable from
+// 11:46 UTC; GHCR pulled 13:51 UTC, Docker Hub repointed 14:20 UTC).
+// Payload steals cloud logins, developer secrets, AI keys, browser
+// passwords, and LiteLLM proxy database contents, and loads RCE tooling.
+// Last safe version is 1.106.2.
+// ============================================================================
+
+-- Variant 1: pip install of trojaned litellm 1.107.0
+index=wineventlog (EventCode=1 OR EventCode=4688) (Image="*\\pip*.exe" OR Image="*\\uv.exe" OR Image="*\\python*.exe" OR Image="*\\py.exe")
+    CommandLine="*litellm*" CommandLine="*1.107.0*"
+| table _time, host, user, Image, CommandLine, ParentImage, ParentCommandLine
+| sort - _time
+
+-- Variant 2: Docker pull/run of tainted LiteLLM tags in the Oct 21 window
+-- v1.107.0 is always trojaned; floating tags only inside 11:46-14:20 UTC Oct 21.
+index=wineventlog (EventCode=1 OR EventCode=4688) Image="*\\docker.exe" CommandLine="*litellm*"
+| eval is_pinned_bad=if(match(CommandLine, "1\\.107\\.0"), 1, 0),
+       is_floating_in_window=if(match(CommandLine, "latest|main-latest|main-stable") AND _time>=1792583160 AND _time<=1792592400, 1, 0)
+| where is_pinned_bad=1 OR is_floating_in_window=1
+| table _time, host, user, CommandLine, ParentImage, is_pinned_bad, is_floating_in_window
+| sort - _time
+
+-- Variant 3: post-install stealer behavior — credential-store reads and shell children
+index=wineventlog (EventCode=4663 OR EventCode=1) ObjectName="*Login Data" Process_Name="*python*.exe" ParentCommandLine="*litellm*"
+| table _time, host, user, ObjectName, Process_Name, ParentCommandLine
+| sort - _time
+| append [
+    search index=wineventlog (EventCode=1 OR EventCode=4688) (Image="*\\cmd.exe" OR Image="*\\powershell.exe" OR Image="*\\pwsh.exe" OR Image="*\\sh" OR Image="*\\bash") ParentImage="*python*.exe" ParentCommandLine="*litellm*"
+    | table _time, host, user, Image, CommandLine, ParentImage, ParentCommandLine
+]
+| sort - _time
