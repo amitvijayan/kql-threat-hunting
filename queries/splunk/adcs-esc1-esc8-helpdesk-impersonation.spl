@@ -1,0 +1,63 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-up.
+// Hunt: Help-desk impersonation to AD CS abuse — ESC1 and ESC8
+// (Microsoft Threat Intelligence, October 30, 2026).
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-october-31-2026.html
+// Attackers posed as IT support on Microsoft Teams, persuaded users
+// to open Quick Assist and share connection codes, then abused
+// misconfigured Active Directory Certificate Services. Neither
+// intrusion exploited a Teams vulnerability; Microsoft attributes
+// the activity to no specific actor. After connecting, attackers
+// transferred archives into Downloads folders, extracted payloads
+// into KB-prefixed directories, and launched portable Python, Bun,
+// or Java runtimes to survey the host and assess certificate
+// services over LDAPS and SMB. Intrusion 1 (ESC1): a template with
+// broad enrollment permissions, requester-supplied identity
+// information, and weak issuance controls let a low-privileged
+// account request authentication certificates for privileged
+// identities — three highly privileged accounts in the first wave
+// (three users targeted, one workstation compromised), eight more
+// in a second wave about 90 minutes after disruption (16 users
+// targeted, another workstation compromised). One privileged
+// identity excluded from automated containment later supported
+// DCSync and data theft, while Defender blocked more than 1,000
+// subsequent SMB file-access attempts and additional logons.
+// Intrusion 2 (ESC8): PetitPotam over EFSRPC coerced
+// domain-controller authentication, relayed to inadequately
+// protected AD CS Web Enrollment, yielding a domain-controller
+// certificate and a ticket-granting ticket via Kerberos PKINIT;
+// the customer isolated the workstation and no further progression
+// was observed. A password reset does not revoke an issued
+// certificate — revoke suspect certificates, do not just reset the
+// account. No hashes, IPs, or domains were published, so every
+// variant below is behavioral; baseline against legitimate Quick
+// Assist use, certificate issuance, and DC replication first.
+// Variant 1a: Quick Assist sessions — the entry point
+index=YOUR_ENDPOINT_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-14d
+| search "QuickAssist.exe"
+| table _time, host, user, parent_user, process_command_line, file_path
+| sort - _time
+// Variant 1b: portable runtimes launched from KB-prefixed payload dirs
+index=YOUR_ENDPOINT_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-14d
+| search ("python.exe" OR "bun.exe" OR "java.exe") AND "Downloads\\KB"
+| table _time, host, user, process_name, file_path, process_command_line, parent_process_name
+| sort - _time
+// Variant 2: AD CS certificate issuance bursts (Event 4887)
+index=YOUR_WINDOWS_INDEX sourcetype=WinEventLog:Security earliest=-30d EventCode=4887
+| stats count as issuances, earliest(_time) as first_seen, latest(_time) as last_seen by host, SubjectUserName, TargetUserName
+| sort - issuances
+// Variant 3: DCSync — directory replication rights used by a user account
+index=YOUR_WINDOWS_INDEX sourcetype=WinEventLog:Security earliest=-30d EventCode=4662
+| search ("1131f6aa" OR "1131f6ad")
+| search NOT SubjectUserName="*$"
+| table _time, host, SubjectUserName, SubjectDomainName, TargetUserName, ObjectName, EventRecordId
+| sort - _time
+// Variant 4a: network logons to certificate-services hosts (ESC8 relay setup)
+index=YOUR_WINDOWS_INDEX sourcetype=WinEventLog:Security earliest=-30d EventCode=4624 Logon_Type=3
+| stats count as logons, earliest(_time) as first_seen, latest(_time) as last_seen by host, src_ip, TargetUserName
+| sort - first_seen
+// Variant 4b: SMB file-access bursts from a single device
+index=YOUR_NETWORK_INDEX sourcetype=YOUR_FIREWALL_SOURCETYPE earliest=-14d dest_port=445
+| bin _time span=1h
+| stats count as connections, dc(dest_ip) as targets, earliest(_time) as first_seen, latest(_time) as last_seen by host, _time
+| sort - connections
