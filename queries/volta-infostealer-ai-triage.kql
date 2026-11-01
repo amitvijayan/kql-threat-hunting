@@ -1,0 +1,112 @@
+// ============================================================================
+// Hunt: VOLTA infostealer — stolen-data bundles triaged by public AI models
+// (Cisco Talos, October 31, 2026) — an infostealer that sends a
+// structured bundle of stolen information to an AI model to assess a
+// victim's assets and security posture, automating the triage step
+// that used to require a human operator
+// MITRE ATT&CK: T1555.003 (Credentials from Password Stores:
+//              Credentials from Web Browsers — infostealer theft),
+//              T1071.001 (Application Layer Protocol: Web Protocols
+//              — stolen-data bundles posted to public AI APIs),
+//              T1041 (Exfiltration Over C2 Channel — bundle upload
+//              to an external AI endpoint)
+// Data: Microsoft Defender — DeviceNetworkEvents and
+//       DeviceFileEvents. Scope every variant to your sanctioned-AI
+//       policy first: these queries surface UNSANCTIONED AI API
+//       traffic from user workstations, so allowlist the AI tools
+//       your org has actually approved before triaging hits.
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-1-2026.html
+// What happened (Cisco Talos, October 31, 2026):
+//      VOLTA sends a structured bundle of stolen information to an
+//      AI model so the model can rank the victim's assets and
+//      security posture — no human operator needed for triage. It
+//      carries a fallback chain across three models — Claude Opus
+//      4.6, Kimi K2, and Gemini 2.5 Flash — so the triage keeps
+//      working even if one model is unavailable. The operational
+//      consequence is prioritization at machine speed: high-value
+//      victims — crypto wallets, privileged credentials, corporate
+//      VPN access — get surfaced faster than a manual review queue,
+//      compressing the time between initial infection and targeted
+//      follow-on action. The detection angle is the outbound
+//      pattern itself: structured data bundles sent to public AI
+//      model endpoints from endpoints that have no business reason
+//      to call them. No hashes, IPs, or victim domains were
+//      published, so every variant below is behavioral. The vendor
+//      API hosts below are the models' public, documented API
+//      endpoints — not victim IoCs — and the hunt is the
+//      unsanctioned use of them from a workstation, not the
+//      endpoints' existence.
+// ============================================================================
+// Vendor public AI API hosts for the three models in VOLTA's
+// fallback chain (Claude Opus 4.6, Kimi K2, Gemini 2.5 Flash).
+// Add or remove hosts to match the models your org sanctions.
+// -- Variant 1: unsanctioned AI API traffic from user workstations --
+// The core hunt from the Talos finding: any workstation posting to
+// a public AI model API is worth a look unless the calling tool is
+// sanctioned. Order by bytes sent — VOLTA's bundle is a structured
+// upload, not a chat message, so large outbound volume stands out.
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where RemoteUrl contains "anthropic.com"
+    or RemoteUrl contains "generativelanguage.googleapis.com"
+    or RemoteUrl contains "moonshot.ai"
+| summarize Connections = count(),
+            BytesSent = sum(SentBytes),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Callers = make_set(InitiatingProcessFileName)
+    by DeviceName, InitiatingProcessAccountName, RemoteUrl
+| order by BytesSent desc, Connections desc
+// -- Variant 2: AI API calls from non-browser processes --
+// A browser calling an AI API can be an employee using a sanctioned
+// web tool. A script host, shell, or unknown binary calling one
+// directly is the infostealer shape: VOLTA's bundle upload does not
+// need a browser tab. Exclude your sanctioned CLI tools here.
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where RemoteUrl contains "anthropic.com"
+    or RemoteUrl contains "generativelanguage.googleapis.com"
+    or RemoteUrl contains "moonshot.ai"
+| where InitiatingProcessFileName !in~ ("msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe")
+| project TimeGenerated, DeviceName, InitiatingProcessAccountName,
+    InitiatingProcessFileName, InitiatingProcessCommandLine,
+    RemoteUrl, RemoteIP, RemotePort, SentBytes
+| order by TimeGenerated desc
+// -- Variant 3: first-seen AI API contact per device (new behavior) --
+// A workstation that never called an AI API before and suddenly
+// starts is the triage-bundle pattern. Baseline is 30 days; hits
+// are devices whose first contact falls inside the last 7 days.
+DeviceNetworkEvents
+| where TimeGenerated > ago(30d)
+| where RemoteUrl contains "anthropic.com"
+    or RemoteUrl contains "generativelanguage.googleapis.com"
+    or RemoteUrl contains "moonshot.ai"
+| summarize FirstContact = min(TimeGenerated),
+            Connections = count(),
+            BytesSent = sum(SentBytes),
+            Callers = make_set(InitiatingProcessFileName)
+    by DeviceName
+| where FirstContact > ago(7d)
+| order by FirstContact desc
+// -- Variant 4: AI API traffic correlated with credential-store access --
+// The strongest VOLTA signal pairs the two halves of the theft:
+// a device that both talked to an AI API and had a non-browser
+// process read browser credential stores (or wallet files) in the
+// same window. Either half alone is triage; both together escalate.
+let AiDevices =
+    DeviceNetworkEvents
+    | where TimeGenerated > ago(7d)
+    | where RemoteUrl contains "anthropic.com"
+        or RemoteUrl contains "generativelanguage.googleapis.com"
+        or RemoteUrl contains "moonshot.ai"
+    | distinct DeviceName;
+DeviceFileEvents
+| where TimeGenerated > ago(7d)
+| where DeviceName in (AiDevices)
+| where FileName in~ ("Login Data", "Login Data-journal", "Cookies",
+    "Local State", "Web Data")
+    or FolderPath contains "wallet"
+| where InitiatingProcessFileName !in~ ("msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe")
+| project TimeGenerated, DeviceName, InitiatingProcessAccountName,
+    InitiatingProcessFileName, FileName, FolderPath, ActionType
+| order by TimeGenerated desc
