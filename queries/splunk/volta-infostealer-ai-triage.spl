@@ -1,0 +1,44 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-up.
+// Hunt: VOLTA infostealer — stolen-data bundles triaged by public
+// AI models (Cisco Talos, October 31, 2026).
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-1-2026.html
+// VOLTA sends a structured bundle of stolen information to an AI
+// model to assess a victim's assets and security posture, automating
+// the triage step that used to require a human operator. Its
+// fallback chain spans Claude Opus 4.6, Kimi K2, and Gemini 2.5
+// Flash, so triage keeps working even if one model is unavailable.
+// The detection angle is the outbound pattern: structured bundles
+// posted to public AI model endpoints from endpoints with no
+// business reason to call them. No hashes, IPs, or victim domains
+// were published, so every variant below is behavioral. The vendor
+// API hosts below are the models' public, documented API endpoints
+// — not victim IoCs — and the hunt is unsanctioned use of them
+// from a workstation. Scope every variant to your sanctioned-AI
+// policy first and allowlist the AI tools your org has approved.
+// Variant 1: unsanctioned AI API traffic from user workstations
+index=YOUR_NETWORK_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-7d
+| search (dest_host="*anthropic.com" OR dest_host="*generativelanguage.googleapis.com" OR dest_host="*moonshot.ai")
+| stats count as connections, sum(bytes_out) as bytes_sent, earliest(_time) as first_seen, latest(_time) as last_seen, values(process_name) as callers by host, user, dest_host
+| sort - bytes_sent
+// Variant 2: AI API calls from non-browser processes
+index=YOUR_NETWORK_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-7d
+| search (dest_host="*anthropic.com" OR dest_host="*generativelanguage.googleapis.com" OR dest_host="*moonshot.ai")
+| search NOT process_name IN ("msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe")
+| table _time, host, user, process_name, process_command_line, dest_host, dest_ip, dest_port, bytes_out
+| sort - _time
+// Variant 3: first-seen AI API contact per device (new behavior)
+index=YOUR_NETWORK_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-30d
+| search (dest_host="*anthropic.com" OR dest_host="*generativelanguage.googleapis.com" OR dest_host="*moonshot.ai")
+| stats earliest(_time) as first_contact, count as connections, sum(bytes_out) as bytes_sent, values(process_name) as callers by host
+| where first_contact > relative_time(now(), "-7d")
+| sort - first_contact
+// Variant 4: AI API traffic correlated with credential-store access
+// Run Variant 1 first, then check its hosts here: a non-browser
+// process reading browser credential stores (or wallet files) on a
+// host that also called an AI API is the full VOLTA shape.
+index=YOUR_ENDPOINT_INDEX sourcetype=YOUR_EDR_SOURCETYPE earliest=-7d
+| search (file_name IN ("Login Data", "Login Data-journal", "Cookies", "Local State", "Web Data") OR file_path="*wallet*")
+| search NOT process_name IN ("msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe")
+| table _time, host, user, process_name, file_name, file_path, action
+| sort - _time
