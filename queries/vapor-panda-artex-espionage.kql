@@ -1,0 +1,82 @@
+// ============================================================================
+// Hunt: Vapor Panda / ARTEX agentic espionage - password spraying, forged
+// admin tokens, and bulk mailbox reads (CrowdStrike, Nov 2026)
+// MITRE ATT&CK: T1110.003 (Password Spraying), T1550.001 (Application
+//   Access Token), T1114.002 (Remote Email Collection), T1078 (Valid Accounts)
+// Data: Microsoft Defender XDR - IdentityLogonEvents, CloudAppEvents,
+//   DeviceLogonEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-3-2026.html
+// Logic: CrowdStrike reports the China-nexus group it tracks as Vapor Panda
+//        ran AI agents built on the ARTEX multi-agent penetration-testing
+//        framework against more than 200 organizations across 14 countries
+//        in 11 days starting October 17, 2026, directed by a human operator
+//        issuing instructions in Chinese. Post-exploitation was confirmed at
+//        nine organizations: in the Greek government intrusion the agents
+//        forged an administrator token and read mailboxes, and against
+//        government entities in Latin America and the Middle East they
+//        deployed the BLOODALCHEMY backdoor. Password spraying and credential
+//        scanning hit at least 12 more high-value targets. Microsoft
+//        separately attributes ARTEX activity to Storm-0940.
+//        No IoCs (IPs, hashes, domains) were published for this campaign,
+//        so these are behavioral hunts: spraying bursts, one actor reading
+//        many mailboxes, and a privileged account suddenly appearing on many
+//        hosts. Behavioral thresholds only; tune to your baseline.
+// ============================================================================
+
+// -- Variant 1: password spraying - many accounts, one source, few successes
+let Lookback = 7d;
+let MinAccounts = 10;
+let MinFailures = 20;
+IdentityLogonEvents
+| where Timestamp > ago(Lookback)
+| where ActionType == "LogonFailed"
+| where isnotempty(IPAddress)
+| summarize FailedLogons = count(),
+            TargetedAccounts = dcount(AccountUpn),
+            Accounts = make_set(AccountUpn, 25),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp)
+    by IPAddress
+| where FailedLogons >= MinFailures and TargetedAccounts >= MinAccounts
+| project IPAddress, FailedLogons, TargetedAccounts, FirstSeen, LastSeen, Accounts
+| order by FailedLogons desc
+
+// -- Variant 2: forged-token mailbox abuse - one actor reading many mailboxes
+//    A forged administrator token lets one source read mailboxes it has no
+//    business touching. Flag a single IP or account behind bulk mailbox
+//    reads across many distinct mailboxes in a short window.
+let ReadWindow = 1d;
+let MinMailboxes = 5;
+let MinReads = 100;
+CloudAppEvents
+| where Timestamp > ago(ReadWindow)
+| where ActionType == "MailItemsAccessed"
+| where isnotempty(IPAddress)
+| summarize Reads = count(),
+            Mailboxes = dcount(AccountObjectId),
+            MailboxList = make_set(AccountDisplayName, 25),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp)
+    by IPAddress, AccountDisplayName
+| where Reads >= MinReads and Mailboxes >= MinMailboxes
+| project IPAddress, AccountDisplayName, Reads, Mailboxes, FirstSeen, LastSeen, MailboxList
+| order by Reads desc
+
+// -- Variant 3: post-exploitation spread - one privileged account, many hosts
+//    After the token forgery, the actor moves laterally. A single account
+//    logging on interactively to many devices in a day is the tell.
+let SpreadWindow = 1d;
+let MinHosts = 5;
+DeviceLogonEvents
+| where Timestamp > ago(SpreadWindow)
+| where LogonType == "RemoteInteractive"
+| where isnotempty(AccountName)
+| summarize Logons = count(),
+            Hosts = dcount(DeviceName),
+            HostList = make_set(DeviceName, 25),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp)
+    by AccountName, AccountDomain
+| where Hosts >= MinHosts
+| project AccountName, AccountDomain, Logons, Hosts, FirstSeen, LastSeen, HostList
+| order by Hosts desc
