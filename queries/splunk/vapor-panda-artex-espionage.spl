@@ -1,0 +1,31 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Hunt: Vapor Panda / ARTEX agentic espionage - password spraying, forged
+// admin tokens, and bulk mailbox reads (CrowdStrike, Nov 2026).
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-3-2026.html
+// No IoCs were published for this campaign, so these are behavioral checks.
+// Tune the thresholds to your baseline.
+
+// Variant 1: password spraying - many accounts, one source, few successes
+index=YOUR_IDENTITY_INDEX sourcetype="signin_event" result="failure"
+| stats count as failed_logons, dc(user) as targeted_accounts,
+    values(user) as accounts, earliest(_time) as first, latest(_time) as last
+    by src_ip
+| where failed_logons >= 20 AND targeted_accounts >= 10
+| sort - failed_logons
+
+// Variant 2: forged-token mailbox abuse - one actor reading many mailboxes
+index=YOUR_O365_INDEX sourcetype="o365_audit" Operation="MailItemsAccessed"
+| stats count as reads, dc(mailbox) as mailboxes,
+    values(mailbox) as mailbox_list, earliest(_time) as first, latest(_time) as last
+    by src_ip, user
+| where reads >= 100 AND mailboxes >= 5
+| sort - reads
+
+// Variant 3: post-exploitation spread - one privileged account, many hosts
+index=YOUR_ENDPOINT_INDEX sourcetype="logon_event" logon_type="remote_interactive"
+| stats count as logons, dc(host) as hosts,
+    values(host) as host_list, earliest(_time) as first, latest(_time) as last
+    by user, domain
+| where hosts >= 5
+| sort - hosts
