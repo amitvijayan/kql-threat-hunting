@@ -1,0 +1,100 @@
+// ============================================================================
+// Hunt: OpenSSH "sshole" auth bypass on musl-based systems - oversized
+//   passwords log into asterisk-locked accounts (fixed in OpenSSH 10.6p2)
+// MITRE ATT&CK: T1078 (Valid Accounts - a locked account logging in with a
+//   password is the flaw firing, not a user forgetting which account they
+//   used)
+// Data: SSH daemon logs (Syslog table as an example - point at wherever
+//   your sshd auth logs land, e.g. /var/log/auth.log forwarded to Sentinel)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-6-2026.html
+// Logic: OpenSSH servers on musl-based Linux (Alpine, OpenWrt, Buildroot,
+//   Yocto) let an attacker log into an account configured to block password
+//   logins by submitting an oversized password of 257 to 1,024 characters.
+//   Accounts are locked by replacing their password hash with an asterisk
+//   in /etc/shadow, but a 2016 OpenSSH patch for the username-enumeration
+//   flaw CVE-2016-6210 made the server hash the supplied password even for
+//   accounts with no usable hash, so response times would not leak valid
+//   usernames. On musl, crypt() returns an asterisk when hashing fails,
+//   which happens for passwords longer than 256 bytes - so the oversized
+//   password hashes to "*", OpenSSH compares it with the account's stored
+//   "*", and the login succeeds. The flaw has existed since 2016 and was
+//   found by independent researcher Özgün Kültekin; it was fixed in
+//   OpenSSH 10.6p2, released November 5, 2026. No CVE ID had been published
+//   for it as of November 6, and no exploitation in the wild had been
+//   reported. Exploitation needs a musl-based system without PAM, password
+//   authentication enabled, one asterisk-locked account, and another
+//   account with a real password hash. It does not bypass accounts that
+//   have valid password hashes, and glibc systems (Debian, Ubuntu, Fedora)
+//   are not affected. Alpine is the sharp end: its openssh-server package
+//   does not use PAM by default, its root account is asterisk-locked, and
+//   its AWS and Azure images ship an alpine user with passwordless doas -
+//   so a successful login to a locked account on those images can mean
+//   root. Variant 1 hunts the core tell: an "Accepted password" event for
+//   an account that can never legitimately log in with a password.
+//   Variant 2 hunts accepted password logins on your musl hosts from
+//   non-admin sources. Variant 3 hunts the probing pattern: failed
+//   password attempts followed by a success for the same user and source.
+//   Fill in your locked accounts, musl hostnames and admin sources before
+//   running; the queries use no invented IoCs - no IPs, hashes or CVE ID
+//   were published. Remediation: apk upgrade openssh on Alpine (or update
+//   to OpenSSH 10.6p2), or disable SSH password authentication.
+// ============================================================================
+
+// -- Variant 1: accepted password logins for asterisk-locked accounts --
+// An account whose /etc/shadow hash is "*" can never legitimately log in
+// with a password. On a musl system without PAM, an oversized password
+// (257-1,024 characters) makes musl crypt() return "*", which matches the
+// stored "*", and OpenSSH lets the attacker in. Any "Accepted password"
+// event for a locked account is therefore the flaw firing - not a user
+// forgetting which account they used.
+let LockedAccounts = dynamic(["root", "<locked-service-account-1>"]);
+Syslog
+| where TimeGenerated > ago(30d)
+| where ProcessName == "sshd"
+| where SyslogMessage startswith "Accepted password"
+| parse SyslogMessage with "Accepted password for " User " from " SourceIP " port " SourcePort " ssh2"
+| where User in (LockedAccounts)
+| project TimeGenerated, Computer, User, SourceIP, SourcePort
+| order by TimeGenerated desc
+
+// -- Variant 2: accepted password logins on musl-based hosts from non-admin sources --
+// Alpine, OpenWrt, Buildroot and Yocto use musl; glibc systems (Debian,
+// Ubuntu, Fedora) are not affected. List your musl hosts and admin sources
+// below. On Alpine, a locked-account login can mean root: its
+// openssh-server ships without PAM, root is asterisk-locked, and the AWS
+// and Azure images give the alpine user passwordless doas - so check any
+// hit for a doas/sudo command to root in the same session window.
+let MuslHosts = dynamic(["<alpine-host-1>", "<openwrt-host-1>"]);
+let AdminSources = dynamic(["<admin-jump-host-ip-1>", "<admin-workstation-subnet>"]);
+Syslog
+| where TimeGenerated > ago(30d)
+| where ProcessName == "sshd"
+| where Computer in (MuslHosts)
+| where SyslogMessage startswith "Accepted password"
+| parse SyslogMessage with "Accepted password for " User " from " SourceIP " port " SourcePort " ssh2"
+| where SourceIP !in (AdminSources)
+| summarize LoginCount = count(),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by Computer, User, SourceIP
+| order by LoginCount desc
+
+// -- Variant 3: failed password attempts followed by an accepted login (length probing) --
+// An attacker finding the exact length window may leave failed attempts
+// before the oversized password succeeds. A success for the same user and
+// source right after failures - especially for a locked account - is the
+// tell. No exploitation in the wild had been reported as of November 5,
+// so treat hits as either the flaw or a password spray that got lucky.
+let MuslHosts = dynamic(["<alpine-host-1>", "<openwrt-host-1>"]);
+Syslog
+| where TimeGenerated > ago(7d)
+| where ProcessName == "sshd"
+| where Computer in (MuslHosts)
+| where SyslogMessage startswith "Failed password" or SyslogMessage startswith "Accepted password"
+| where SyslogMessage !contains "invalid user"
+| parse SyslogMessage with * "password for " User " from " SourceIP " port " SourcePort " ssh2"
+| summarize FailedCount = countif(SyslogMessage startswith "Failed password"),
+            AcceptedCount = countif(SyslogMessage startswith "Accepted password"),
+            FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated)
+    by Computer, User, SourceIP
+| where AcceptedCount > 0 and FailedCount > 0
+| order by FailedCount desc
