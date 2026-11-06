@@ -1,0 +1,51 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your sshd auth logs (os index / syslog sourcetype shown here).
+// Replace the index and field names with your own. Same logic, same
+// write-up. Fill in your locked accounts, musl hostnames and admin sources
+// before running; the queries use no invented IoCs - no IPs, hashes or
+// CVE ID were published.
+
+// -- Variant 1: accepted password logins for asterisk-locked accounts --
+// An account whose /etc/shadow hash is "*" can never legitimately log in
+// with a password. On a musl system without PAM, an oversized password
+// (257-1,024 characters) makes musl crypt() return "*", which matches the
+// stored "*", and OpenSSH lets the attacker in. Any "Accepted password"
+// event for a locked account is therefore the flaw firing.
+index=os sourcetype=syslog sshd "Accepted password" earliest=-30d
+| rex field=_raw "Accepted password for (?<user>\S+) from (?<src_ip>\S+) port (?<src_port>\d+) ssh2"
+| search user IN ("root", "<locked-service-account-1>")
+| table _time, host, user, src_ip, src_port
+| sort - _time
+
+// -- Variant 2: accepted password logins on musl-based hosts from non-admin sources --
+// Alpine, OpenWrt, Buildroot and Yocto use musl; glibc systems (Debian,
+// Ubuntu, Fedora) are not affected. List your musl hosts and admin sources
+// below. On Alpine, a locked-account login can mean root: its
+// openssh-server ships without PAM, root is asterisk-locked, and the AWS
+// and Azure images give the alpine user passwordless doas - so check any
+// hit for a doas/sudo command to root in the same session window.
+index=os sourcetype=syslog sshd "Accepted password" earliest=-30d
+| rex field=_raw "Accepted password for (?<user>\S+) from (?<src_ip>\S+) port (?<src_port>\d+) ssh2"
+| search host IN ("<alpine-host-1>", "<openwrt-host-1>")
+| search NOT src_ip="<admin-jump-host-ip-1>"
+    NOT src_ip="<admin-workstation-subnet>"
+| stats count AS logins, earliest(_time) AS first_seen,
+        latest(_time) AS last_seen by host, user, src_ip
+| sort - logins
+
+// -- Variant 3: failed password attempts followed by an accepted login (length probing) --
+// An attacker finding the exact length window may leave failed attempts
+// before the oversized password succeeds. A success for the same user and
+// source right after failures - especially for a locked account - is the
+// tell. No exploitation in the wild had been reported as of November 5,
+// so treat hits as either the flaw or a password spray that got lucky.
+index=os sourcetype=syslog sshd ("Failed password" OR "Accepted password") earliest=-7d
+| rex field=_raw "password for (?<user>\S+) from (?<src_ip>\S+) port (?<src_port>\d+) ssh2"
+| search host IN ("<alpine-host-1>", "<openwrt-host-1>")
+| search NOT _raw="*invalid user*"
+| stats count(eval(searchmatch("Failed password"))) AS failed,
+        count(eval(searchmatch("Accepted password"))) AS accepted,
+        earliest(_time) AS first_seen, latest(_time) AS last_seen
+    by host, user, src_ip
+| where failed > 0 AND accepted > 0
+| sort - failed
