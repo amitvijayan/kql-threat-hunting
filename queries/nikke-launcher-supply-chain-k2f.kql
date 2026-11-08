@@ -1,0 +1,101 @@
+// ============================================================================
+// Hunt: NIKKE PC launcher supply-chain compromise - K2F remote-access agent
+//   and crypto-wallet stealer delivered via trojaned launcher scripts
+// MITRE ATT&CK: T1195.002 (Supply Chain Compromise: Compromise Software
+//   Supply Chain), T1071.001 (Web Protocols), T1105 (Ingress Tool
+//   Transfer), T1059 (Command and Scripting Interpreter - LuaJIT payload
+//   and remote command execution), T1113 (Screen Capture), T1555.003
+//   (Credentials from Web Browsers)
+// Data: Microsoft Defender DeviceNetworkEvents, DeviceFileEvents,
+//   DeviceImageLoadEvents, DeviceProcessEvents (Defender for Endpoint)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-8-2026.html
+// Logic: On September 27, 2026, four JavaScript files on Level Infinite's
+//   official CDN serving the Goddess of Victory: NIKKE PC launcher were
+//   modified to inject a malicious loader. Whenever a player opened the
+//   launcher, the loader downloaded additional code from
+//   attacker-controlled domains - insightjs.com, falling back to
+//   insightjs.org. The downloaded code abused the launcher's native
+//   functionality to fetch a LuaJIT payload called insight.bundle, which
+//   installed a remote-access agent referred to as K2F. K2F lets attackers
+//   remotely execute commands, browse and download local files, capture
+//   screenshots, collect NIKKE account credentials, and steal information
+//   stored in web browsers. The malware could also install a Windows DLL,
+//   platform_experience_helper.dll, that remained active after the launcher
+//   was closed; strings in a sample uploaded to VirusTotal indicate it can
+//   steal cryptocurrency wallet data from browser extensions including
+//   MetaMask, Phantom, and Coinbase Wallet. Level Infinite shipped a fixed
+//   client on November 4, 2026, so the exposure window is roughly five
+//   weeks (September 27 - November 4). It is not known how many players
+//   were affected, how the attackers gained write access to the CDN, or
+//   whether the wallet-stealing DLL was ever deployed to infected machines,
+//   so treat any hit as a confirmed compromise of that machine: update the
+//   client, run a full malware scan, and change passwords and sensitive
+//   credentials from a clean device. Variant 1 hunts connections to the
+//   attacker domains. Variant 2 hunts the payload and DLL artifacts on
+//   disk and in memory. Variant 3 hunts K2F's post-exploitation behaviour
+//   (shell execution and browser credential access) on devices that talked
+//   to the domains. The queries use no invented IoCs - no hashes or IPs
+//   were published; the domains, filenames and behaviours are the ones
+//   reported by BleepingComputer and independent researcher MotherSphere.
+//   Remediation: update the NIKKE client to the November 4 fixed version,
+//   treat any hit machine as compromised, and rotate credentials from a
+//   clean device.
+// ============================================================================
+
+// -- Variant 1: network connections to the attacker domains --
+// The trojaned launcher scripts reached out to insightjs.com, falling back
+// to insightjs.org, every time the launcher was opened. Any connection to
+// either domain from a device that runs the NIKKE launcher is the
+// compromise - the domains have no legitimate purpose. The exposure window
+// ran September 27 to November 4, 2026, but keep the window open-ended in
+// case a stale client still phones home.
+let MaliciousDomains = dynamic(["insightjs.com", "insightjs.org"]);
+DeviceNetworkEvents
+| where TimeGenerated > ago(60d)
+| where RemoteUrl has_any (MaliciousDomains)
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, InitiatingProcessFolderPath, RemoteUrl, RemoteIP, RemotePort
+| order by TimeGenerated desc
+
+// -- Variant 2: K2F payload and wallet-stealer DLL artifacts --
+// The loader fetched a LuaJIT payload named insight.bundle, and the
+// malware could install platform_experience_helper.dll, which stayed
+// active after the launcher closed. Hunt both artifacts as files on disk
+// and as loaded images - either one on a machine is a confirmed hit.
+let MaliciousFiles = dynamic(["insight.bundle", "platform_experience_helper.dll"]);
+DeviceFileEvents
+| where TimeGenerated > ago(60d)
+| where FileName in (MaliciousFiles)
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, InitiatingProcessFileName, SHA256
+| order by TimeGenerated desc
+// -- DLL loads (same artifacts, seen in memory) --
+DeviceImageLoadEvents
+| where TimeGenerated > ago(60d)
+| where FileName in (MaliciousFiles)
+| project TimeGenerated, DeviceName, FileName, FolderPath, InitiatingProcessFileName, InitiatingProcessFolderPath, SHA256
+| order by TimeGenerated desc
+
+// -- Variant 3: K2F post-exploitation behaviour on exposed devices --
+// K2F executes remote commands and steals browser-stored information, and
+// the DLL targets crypto-wallet browser extensions (MetaMask, Phantom,
+// Coinbase Wallet). Take every device that connected to the attacker
+// domains and look for shell interpreters spawning or processes touching
+// browser credential stores on those devices in the same window.
+let MaliciousDomains = dynamic(["insightjs.com", "insightjs.org"]);
+let ExposedDevices =
+    DeviceNetworkEvents
+    | where TimeGenerated > ago(60d)
+    | where RemoteUrl has_any (MaliciousDomains)
+    | distinct DeviceName;
+DeviceProcessEvents
+| where TimeGenerated > ago(60d)
+| where DeviceName in (ExposedDevices)
+| where FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+// -- browser credential-store access on the same exposed devices --
+DeviceFileEvents
+| where TimeGenerated > ago(60d)
+| where DeviceName in (ExposedDevices)
+| where FileName in~ ("Login Data", "Web Data", "Login Data For Account")
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, InitiatingProcessFileName
+| order by TimeGenerated desc
