@@ -1,0 +1,42 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your network, endpoint file and process logs (index and field
+// names shown here are examples - replace them with your own). Same logic,
+// same write-up. The queries use no invented IoCs - no hashes or IPs were
+// published; the domains, filenames and behaviours are the ones reported
+// by BleepingComputer and independent researcher MotherSphere.
+
+// -- Variant 1: network connections to the attacker domains --
+// The trojaned launcher scripts reached out to insightjs.com, falling back
+// to insightjs.org, every time the launcher was opened. Any connection to
+// either domain from a device that runs the NIKKE launcher is the
+// compromise - the domains have no legitimate purpose. Exposure window:
+// September 27 to November 4, 2026.
+index=network (url="*insightjs.com*" OR url="*insightjs.org*") earliest=-60d
+| table _time, host, process, url, dest_ip, dest_port
+| sort - _time
+
+// -- Variant 2: K2F payload and wallet-stealer DLL artifacts --
+// The loader fetched a LuaJIT payload named insight.bundle, and the malware
+// could install platform_experience_helper.dll, which stayed active after
+// the launcher closed. Hunt both artifacts as files on disk and as loaded
+// images - either one on a machine is a confirmed hit.
+index=endpoint (file_name="insight.bundle" OR file_name="platform_experience_helper.dll") earliest=-60d
+| table _time, host, action, file_name, file_path, process, file_hash
+| sort - _time
+
+// -- Variant 3: K2F post-exploitation behaviour on exposed devices --
+// K2F executes remote commands and steals browser-stored information, and
+// the DLL targets crypto-wallet browser extensions (MetaMask, Phantom,
+// Coinbase Wallet). The subsearch first lists devices that connected to
+// the attacker domains; the outer search then looks for shell interpreters
+// spawning or processes touching browser credential stores on those devices.
+index=endpoint (process_name="cmd.exe" OR process_name="powershell.exe" OR process_name="pwsh.exe" OR process_name="wscript.exe" OR process_name="cscript.exe" OR process_name="mshta.exe") earliest=-60d
+[ search index=network (url="*insightjs.com*" OR url="*insightjs.org*") earliest=-60d | stats count by host | fields host ]
+| table _time, host, process_name, process, parent_process
+| sort - _time
+
+// -- browser credential-store access on the same exposed devices --
+index=endpoint (file_name="Login Data" OR file_name="Web Data" OR file_name="Login Data For Account") earliest=-60d
+[ search index=network (url="*insightjs.com*" OR url="*insightjs.org*") earliest=-60d | stats count by host | fields host ]
+| table _time, host, action, file_name, file_path, process
+| sort - _time
