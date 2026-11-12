@@ -1,0 +1,82 @@
+// ============================================================================
+// Hunt: ScreenConnect MSP campaign - rogue remote-access clients pushed
+//   through compromised MSP environments (Huntress, November 11, 2026)
+// MITRE ATT&CK: T1219 (Remote Access Software), T1105 (Ingress Tool
+//   Transfer), T1059.003 (Windows Command Shell), T1078 (Valid Accounts)
+// Data: Microsoft Defender DeviceFileEvents, DeviceProcessEvents
+//   (Defender for Endpoint)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-12-2026.html
+// Logic: Huntress discovered an active campaign on November 11, 2026
+//   (first activity around 17:47 UTC) targeting cloud-hosted
+//   ScreenConnect instances. Attackers compromise a managed service
+//   provider's ScreenConnect environment, then use its Run Command
+//   feature to deploy rogue remote-access clients onto customer devices
+//   - the MSP's own management tool becomes the delivery mechanism. Six
+//   MSPs and 286 affected endpoints across 47 organizations were
+//   confirmed within hours of discovery, and Huntress says the numbers
+//   are still climbing. One artifact tied to the campaign is a script
+//   named SSA-2026-STATEMENT-15518787.bat, impersonating a Social
+//   Security Administration statement, first uploaded to VirusTotal on
+//   July 25, 2026. ConnectWise (which makes ScreenConnect) says it is
+//   investigating and has urged partners to avoid interactive remote
+//   sessions with potentially compromised devices. No CVE or patch
+//   applies - this is abuse of legitimate remote-access features, so
+//   the fix is containment, credential rotation, and hunting for rogue
+//   clients, not patching. The threat actor is unnamed and how the MSP
+//   environments were first compromised is not known, so no actor IoCs
+//   are invented here - every query hunts the behaviour and the one
+//   named artifact from the brief. Any hit on Variant 1 or 2 means a
+//   device may have a rogue remote-access client installed - isolate
+//   it and check whether its MSP's ScreenConnect environment has been
+//   reviewed before reconnecting.
+// ============================================================================
+
+// -- Variant 1: the named campaign artifact SSA-2026-STATEMENT-15518787.bat --
+// The only artifact Huntress tied to the campaign by name. It impersonates
+// an SSA statement and was first seen on VirusTotal on July 25, 2026 -
+// before the November MSP campaign - so the window is 30 days, not just
+// the campaign week. Any execution or file creation of this name on an
+// endpoint is worth triaging immediately.
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "SSA-2026-STATEMENT-15518787.bat"
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, SHA256, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 1b: the same artifact executed as a process --
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "SSA-2026-STATEMENT-15518787.bat"
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 2: ScreenConnect spawning shells, installers or downloaders --
+// The campaign's delivery mechanism is ScreenConnect's own Run Command
+// feature, so the signal is the ScreenConnect client/service process
+// launching a child process. A remote-access agent legitimately spawns
+// processes during a support session, so this variant is scoped to
+// shells, installers and downloaders - the child processes that install
+// a rogue client - and to the 7-day campaign window. Triage any hit
+// against the MSP's session records: a Run Command with no matching
+// support ticket is the abuse pattern.
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName in~ ("ScreenConnect.ClientService.exe", "ScreenConnect.WindowsClient.exe", "ScreenConnect.Client.exe")
+| where FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "msiexec.exe", "rundll32.exe", "mshta.exe", "wscript.exe", "cscript.exe", "regsvr32.exe", "bitsadmin.exe", "curl.exe", "certutil.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 3: remote-access tools running on endpoints --
+// The campaign's payload is a rogue remote-access client, but the brief
+// does not name which tool the attackers install - so this variant lists
+// executions of common third-party remote-access tools and leaves the
+// triage to the environment: compare the hits against the remote-access
+// tools your organisation (and your MSP) actually approves. Any tool
+// outside that approved list, or a first-seen appearance in the
+// campaign window, is a candidate rogue client. ScreenConnect itself is
+// deliberately excluded here - it is covered by Variant 2.
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where FileName in~ ("AnyDesk.exe", "TeamViewer.exe", "TeamViewer_Service.exe", "RustDesk.exe", "Splashtop Streamer.exe", "LogMeIn.exe", "GoToAssist.exe", "RemoteUtilities.exe", "rutserv.exe", "AteraAgent.exe", "DameWare.exe", "RealVNC.exe", "vncserver.exe", "TightVNC.exe", "Ammyy Admin.exe", "AA_v3.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
