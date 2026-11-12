@@ -1,0 +1,45 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your endpoint process and file logs (index and field
+// names shown here are examples - replace them with your own). Same logic,
+// same write-up. The queries use no invented IoCs - the brief names one
+// artifact (SSA-2026-STATEMENT-15518787.bat) and the campaign's delivery
+// mechanism (ScreenConnect Run Command pushing rogue remote-access
+// clients); the actor is unnamed and how the MSP environments were first
+// compromised is not known, so every query hunts the behaviour and the
+// named artifact from the brief.
+
+// -- Variant 1: the named campaign artifact SSA-2026-STATEMENT-15518787.bat --
+// The only artifact Huntress tied to the campaign by name. It impersonates
+// an SSA statement and was first seen on VirusTotal on July 25, 2026 -
+// before the November MSP campaign - so the window is 30 days, not just
+// the campaign week. Any execution or file creation of this name on a host
+// is worth triaging immediately.
+index=endpoint (file_name="SSA-2026-STATEMENT-15518787.bat" OR process_name="SSA-2026-STATEMENT-15518787.bat") earliest=-30d
+| table _time, host, action, file_name, file_path, file_hash, parent_process_name, parent_process, process, user
+| sort - _time
+
+// -- Variant 2: ScreenConnect spawning shells, installers or downloaders --
+// The campaign's delivery mechanism is ScreenConnect's own Run Command
+// feature, so the signal is the ScreenConnect client/service process
+// launching a child process. A remote-access agent legitimately spawns
+// processes during a support session, so this variant is scoped to
+// shells, installers and downloaders - the child processes that install
+// a rogue client - and to the 7-day campaign window. Triage any hit
+// against the MSP's session records: a Run Command with no matching
+// support ticket is the abuse pattern.
+index=endpoint (parent_process_name="ScreenConnect.ClientService.exe" OR parent_process_name="ScreenConnect.WindowsClient.exe" OR parent_process_name="ScreenConnect.Client.exe") (process_name="cmd.exe" OR process_name="powershell.exe" OR process_name="pwsh.exe" OR process_name="msiexec.exe" OR process_name="rundll32.exe" OR process_name="mshta.exe" OR process_name="wscript.exe" OR process_name="cscript.exe" OR process_name="regsvr32.exe" OR process_name="bitsadmin.exe" OR process_name="curl.exe" OR process_name="certutil.exe") earliest=-7d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
+
+// -- Variant 3: remote-access tools running on endpoints --
+// The campaign's payload is a rogue remote-access client, but the brief
+// does not name which tool the attackers install - so this variant lists
+// executions of common third-party remote-access tools and leaves the
+// triage to the environment: compare the hits against the remote-access
+// tools your organisation (and your MSP) actually approves. Any tool
+// outside that approved list, or a first-seen appearance in the
+// campaign window, is a candidate rogue client. ScreenConnect itself is
+// deliberately excluded here - it is covered by Variant 2.
+index=endpoint (process_name="AnyDesk.exe" OR process_name="TeamViewer.exe" OR process_name="TeamViewer_Service.exe" OR process_name="RustDesk.exe" OR process_name="Splashtop Streamer.exe" OR process_name="LogMeIn.exe" OR process_name="GoToAssist.exe" OR process_name="RemoteUtilities.exe" OR process_name="rutserv.exe" OR process_name="AteraAgent.exe" OR process_name="DameWare.exe" OR process_name="RealVNC.exe" OR process_name="vncserver.exe" OR process_name="TightVNC.exe" OR process_name="Ammyy Admin.exe" OR process_name="AA_v3.exe") earliest=-7d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
