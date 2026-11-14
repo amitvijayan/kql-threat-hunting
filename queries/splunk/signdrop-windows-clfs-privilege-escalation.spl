@@ -1,0 +1,44 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your endpoint process and file logs (index and field
+// names shown here are examples - replace them with your own). Same logic,
+// same write-up. The queries use no invented IoCs - the brief names the
+// .cnpf authentication file, the Object Manager symbolic-link redirect,
+// Windows Defender coerced through its signature-update RPC interface,
+// and the CLFS log/container preparation; there is no CVE, no patch, and
+// no reported in-the-wild exploitation, so every query hunts the
+// behaviour, not an indicator list.
+
+// -- Variant 1: a CLFS .cnpf authentication file created in a user-writable path --
+// The .cnpf file is created by CLFS in the SYSTEM context of the
+// privileged process that opened the prepared log - but at the path the
+// attacker chose through the symbolic-link redirect. A .cnpf landing in
+// a user-controlled folder (profile, Temp, Public, Desktop, Downloads)
+// is not normal CLFS behaviour and is the core artifact of this
+// technique. Scoped to 14 days from the November 10 disclosure.
+index=endpoint file_name="*.cnpf" (file_path="*\\Users\\*" OR file_path="*\\Temp\\*" OR file_path="*\\Public\\*" OR file_path="*\\Desktop\\*" OR file_path="*\\Downloads\\*") earliest=-14d
+| table _time, host, action, file_name, file_path, file_hash, parent_process_name, parent_process, process, user
+| sort - _time
+
+// -- Variant 2: Windows Defender creating or opening a .cnpf file --
+// The trigger step is a privileged process opening the attacker-prepared
+// log. The brief names Windows Defender, coerced through its
+// signature-update RPC interface, as the privileged process. Defender
+// (MsMpEng.exe, with MpCmdRun.exe for signature-update work) has no
+// ordinary reason to touch a .cnpf file, so any such event is a strong
+// signal. Triage against Variant 1: the same host, the same .cnpf path,
+// and a standard-user process that prepared the log shortly before.
+index=endpoint file_name="*.cnpf" (parent_process_name="MsMpEng.exe" OR parent_process_name="MpCmdRun.exe") earliest=-14d
+| table _time, host, action, file_name, file_path, file_hash, parent_process_name, parent_process, process, user
+| sort - _time
+
+// -- Variant 3: a shell running as SYSTEM but launched by a non-SYSTEM process --
+// The end state of SignDrop is a SYSTEM shell for a standard user. A
+// command shell or script host running under the SYSTEM account whose
+// parent process runs as a normal user account is the tell. Legitimate
+// SYSTEM shells are launched by service hosts, so those parents are
+// excluded; anything left is worth a look, especially on a host that
+// also appears in Variant 1 or 2. Scoped to 14 days from disclosure.
+index=endpoint (process_name="cmd.exe" OR process_name="powershell.exe" OR process_name="pwsh.exe" OR process_name="wscript.exe" OR process_name="cscript.exe") user="*SYSTEM" earliest=-14d
+| search NOT parent_user="*SYSTEM" NOT parent_process_name IN ("services.exe", "svchost.exe", "wininit.exe", "taskhostw.exe", "smss.exe", "csrss.exe")
+| table _time, host, process_name, process, user, parent_process_name, parent_process, parent_user
+| sort - _time
