@@ -1,0 +1,88 @@
+// ============================================================================
+// Hunt: Windows "SignDrop" CLFS privilege-escalation zero-day
+//   (researcher Abdelhamid Naceri / Nightmare Eclipse, PoC published
+//   November 10, 2026 - the same day as Microsoft's November Patch Tuesday)
+// MITRE ATT&CK: T1068 (Privilege Escalation), T1059.003 (Windows Command
+//   Shell - the end state is a SYSTEM shell)
+// Data: Microsoft Defender DeviceFileEvents, DeviceProcessEvents
+//   (Defender for Endpoint)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-14-2026.html
+// Logic: SignDrop targets the Common Log File System (CLFS) driver and
+//   abuses the very mitigation Microsoft introduced in October 2025 to
+//   defend CLFS against authentication attacks. A standard user prepares
+//   a CLFS log and container, then uses Object Manager symbolic links to
+//   redirect where the driver's .cnpf authentication file lands. When a
+//   privileged process such as Windows Defender later opens the prepared
+//   log - coerced through its signature-update RPC interface - CLFS
+//   creates the authentication file in that process's SYSTEM context, at
+//   the attacker-chosen path, with the original file's access
+//   permissions. The result is a SYSTEM-owned file the standard user can
+//   write to, and a SYSTEM shell. Naceri tested the exploit on Windows
+//   11 26H2, an experimental 26H2 build, and an experimental Windows
+//   Server 2025 build. There is no CVE, no patch, and no reported
+//   in-the-wild exploitation, and the flaw is not in CISA's KEV catalog
+//   - report the capability as demonstrated, the exposure as estimated,
+//   and the exploitation status as unproven. The researcher's estimate
+//   that about 80 percent of Windows installations are vulnerable is his
+//   own, not a confirmed count; independent reproduction by Will Dormann
+//   confirmed the exploit works as described, though not on all Windows
+//   11 versions, and Dormann's qualifier is that the vulnerable machines
+//   appear to be Windows 11 26H2 installations that have existed for
+//   more than 90 days, which narrows the real population considerably.
+//   Microsoft has not commented. Naceri notes there is currently no
+//   solution except waiting for a patch: disabling the CLFS mitigation
+//   would re-expose machines to the memory-corruption attacks it was
+//   built to stop. Scope check (manual, not a query): read the CLFS
+//   authentication mode in the registry - a value of 0 or 1 (learning or
+//   enforcement mode) means the machine is in scope. No IoCs are
+//   invented here: no hashes, paths, or process names beyond the ones
+//   the brief itself names (.cnpf, Windows Defender, CLFS).
+//   Any hit on Variant 1 or 2 means a prepared CLFS log was opened by a
+//   privileged process - treat the host as potentially escalated and
+//   look for the SYSTEM shell in Variant 3.
+// ============================================================================
+
+// -- Variant 1: a CLFS .cnpf authentication file created in a user-writable path --
+// The .cnpf file is created by CLFS in the SYSTEM context of the
+// privileged process that opened the prepared log - but at the path the
+// attacker chose through the symbolic-link redirect. A .cnpf landing in
+// a user-controlled folder (profile, Temp, Public, Desktop, Downloads)
+// is not normal CLFS behaviour and is the core artifact of this
+// technique. Scoped to 14 days from the November 10 disclosure.
+DeviceFileEvents
+| where TimeGenerated > ago(14d)
+| where FileName endswith ".cnpf"
+| where FolderPath has_any (@"\Users\", @"\Temp\", @"\Public\", @"\Desktop\", @"\Downloads\")
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, SHA256, InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountName
+| order by TimeGenerated desc
+
+// -- Variant 2: Windows Defender creating or opening a .cnpf file --
+// The trigger step is a privileged process opening the attacker-prepared
+// log. The brief names Windows Defender, coerced through its
+// signature-update RPC interface, as the privileged process. Defender
+// (MsMpEng.exe, with MpCmdRun.exe for signature-update work) has no
+// ordinary reason to touch a .cnpf file, so any such event is a strong
+// signal. Triage against Variant 1: the same host, the same .cnpf path,
+// and a standard-user process that prepared the log shortly before.
+DeviceFileEvents
+| where TimeGenerated > ago(14d)
+| where FileName endswith ".cnpf"
+| where InitiatingProcessFileName in~ ("MsMpEng.exe", "MpCmdRun.exe")
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, SHA256, InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountName
+| order by TimeGenerated desc
+
+// -- Variant 3: a shell running as SYSTEM but launched by a non-SYSTEM process --
+// The end state of SignDrop is a SYSTEM shell for a standard user. A
+// command shell or script host running under the SYSTEM account whose
+// parent process runs as a normal user account is the tell. Legitimate
+// SYSTEM shells are launched by service hosts, so those parents are
+// excluded; anything left is worth a look, especially on a host that
+// also appears in Variant 1 or 2. Scoped to 14 days from disclosure.
+DeviceProcessEvents
+| where TimeGenerated > ago(14d)
+| where FileName in~ ("cmd.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe")
+| where AccountName endswith "SYSTEM"
+| where InitiatingProcessAccountName !endswith "SYSTEM"
+| where InitiatingProcessFileName !in~ ("services.exe", "svchost.exe", "wininit.exe", "taskhostw.exe", "smss.exe", "csrss.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, AccountName, InitiatingProcessFileName, InitiatingProcessCommandLine, InitiatingProcessAccountName
+| order by TimeGenerated desc
