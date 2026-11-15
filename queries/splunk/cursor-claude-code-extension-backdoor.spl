@@ -1,0 +1,80 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Feed it your endpoint process and file logs (index and field
+// names shown here are examples - replace them with your own). Same logic,
+// same write-up. The queries use no invented IoCs - the brief names the
+// tampered extension versions (2.1.312 and 2.1.313, fixed in 2.1.314),
+// the October 29, 2026 exposure window (2:27 a.m. to 1:35 p.m. PT, about
+// 11 hours), and the payload behaviour (system-information gathering,
+// attacker SSH key, remote-login enablement, tunnel persistence); no
+// attacker key value or tunnel destination was published, so every query
+// hunts the behaviour and the named versions.
+
+// -- Variant 1: the tampered Claude Code extension builds 2.1.312 / 2.1.313 --
+// The only hard artifact the brief names. Cursor installs marketplace
+// extensions under versioned folders (e.g. anthropic.claude-code-2.1.312),
+// so the signal is any file event under a claude-code folder carrying
+// one of the two tampered versions. The window is 30 days to cover the
+// October 29 exposure and any later reinstall from a cached copy. The
+// fixed version is 2.1.314 - a hit on 2.1.312 or 2.1.313 is the tampered
+// build, not the fix.
+index=endpoint (file_path="*claude-code*2.1.312*" OR file_path="*claude-code*2.1.313*") earliest=-30d
+| table _time, host, action, file_name, file_path, file_hash, parent_process_name, parent_process
+| sort - _time
+
+// -- Variant 1b: the tampered extension loaded as a process --
+// Same version signal, seen from the process side: Cursor (or VS Code)
+// loading files from a tampered claude-code version folder. Catches the
+// case where the extension was already on disk before the file-event
+// window, or where file events are not collected.
+index=endpoint (process="*claude-code*2.1.312*" OR process="*claude-code*2.1.313*") earliest=-30d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
+
+// -- Variant 2: attacker SSH key added to authorized_keys --
+// The payload's persistence step: add the attacker's own SSH key to the
+// machine. The brief names no key value, so this variant hunts any
+// creation or modification of an authorized_keys file - legitimate
+// provisioning does this too, so triage each hit against your own key
+// management: a key added around October 29, 2026, or a key you do not
+// recognise, is the compromise signal. Scoped to the 30-day window
+// covering the exposure.
+index=endpoint file_name="authorized_keys" (action=created OR action=modified) earliest=-30d
+| table _time, host, action, file_name, file_path, file_hash, parent_process_name, parent_process
+| sort - _time
+
+// -- Variant 2b: shell commands touching authorized_keys --
+// Same persistence step seen from the process side: a shell or editor
+// writing to an authorized_keys file. The payload ran JavaScript inside
+// the extension host, so the write may not go through a shell at all -
+// this variant is a net for the cases where it does, and for any
+// follow-on manual key planting.
+index=endpoint process="*authorized_keys*" (process_name="bash" OR process_name="sh" OR process_name="zsh" OR process_name="cmd.exe" OR process_name="powershell.exe" OR process_name="pwsh.exe" OR process_name="echo" OR process_name="cat" OR process_name="tee" OR process_name="curl.exe" OR process_name="wget" OR process_name="notepad.exe" OR process_name="code.exe" OR process_name="cursor.exe") earliest=-30d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
+
+// -- Variant 3: remote login / SSH server switched on --
+// The payload tried to switch on remote access. On macOS that is
+// systemsetup -setremotelogin on (or launchctl loading sshd); on Windows
+// it is enabling or starting the OpenSSH server. The brief notes the
+// backdoor likely failed on many Windows and macOS systems where SSH was
+// not already enabled, so a remote-login enablement in the exposure
+// window - especially on a machine that never had SSH on - is a strong
+// signal. Legitimate admins enable SSH too, so compare each hit against
+// your change records.
+index=endpoint (process="*setremotelogin*" OR process="*sshd*" OR process="*ssh.plist*" OR process="*OpenSSH.Server*" OR process="*Add-WindowsCapability*") (process_name="systemsetup" OR process_name="launchctl" OR process_name="sc.exe" OR process_name="net.exe" OR process_name="powershell.exe" OR process_name="pwsh.exe" OR process_name="cmd.exe" OR process_name="dism.exe") earliest=-30d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
+
+// -- Variant 4: system-information collection by Cursor / VS Code --
+// The payload gathered username, computer name, public IP and Git email
+// in-process as JavaScript, so no shell command is guaranteed - this
+// variant hunts the observable shell-level equivalent: the editor
+// spawning whoami, hostname, ipconfig/ifconfig, or git config to read
+// the user's Git email. Developers run these commands legitimately, so
+// this is a triage signal, not a verdict: look for the burst pattern -
+// several of these in quick succession from the same editor process in
+// the October 29 window - and correlate with Variants 1-3 before
+// acting.
+index=endpoint (parent_process_name="Cursor.exe" OR parent_process_name="Code.exe" OR parent_process_name="cursor" OR parent_process_name="code") ((process_name="whoami.exe" OR process_name="hostname.exe" OR process_name="ipconfig.exe" OR process_name="ifconfig") OR (process_name="curl.exe" OR process_name="wget" OR process_name="git.exe" OR process_name="git") process="*config*") earliest=-30d
+| table _time, host, process_name, process, parent_process_name, parent_process, user
+| sort - _time
