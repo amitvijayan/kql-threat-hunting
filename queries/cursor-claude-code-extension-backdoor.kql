@@ -1,0 +1,138 @@
+// ============================================================================
+// Hunt: Backdoored Claude Code extension served from Cursor's marketplace
+//   (Fireworks AI key exposure, October 29, 2026)
+// MITRE ATT&CK: T1195.002 (Supply Chain Compromise: Compromise Software
+//   Supply Chain), T1098.004 (Account Manipulation: SSH Authorized Keys),
+//   T1021.004 (Remote Services: SSH), T1082 (System Information Discovery)
+// Data: Microsoft Defender DeviceFileEvents, DeviceProcessEvents
+//   (Defender for Endpoint)
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-15-2026.html
+// Logic: Cursor confirmed on November 13, 2026 that attackers used an
+//   access key Cursor had issued to Fireworks AI - exposed by the vendor -
+//   to copy data from a read-only storage bucket Cursor shared with it.
+//   That data included historical coding-agent traces holding unredacted
+//   credentials, and the attacker used one of those credentials to reach
+//   Cursor's internal systems and its extension distribution cache. On
+//   October 29, 2026, from 2:27 a.m. to 1:35 p.m. Pacific time (about 11
+//   hours), the attacker placed tampered copies of Anthropic's Claude Code
+//   extension - versions 2.1.312 and 2.1.313 - directly on the cache
+//   serving Cursor's own VS Code extension marketplace. Cursor estimates
+//   up to 5,000 users who requested those versions in that window may
+//   have received the malicious build. The modified extension ran
+//   malicious JavaScript the moment it loaded, with no click needed: it
+//   gathered the username, computer name, public IP address and Git
+//   email, then tried to add the attacker's own SSH key to the machine,
+//   switch on remote login, and keep a tunnel open back to the attacker.
+//   Researchers cited by BleepingComputer found coding errors that likely
+//   prevented the backdoor from working on many Windows and macOS systems
+//   where SSH was not already enabled - a mitigating accident, not a
+//   defence. Anthropic's genuine extension was not compromised, and
+//   neither was Open VSX - the fake copies were placed directly on the
+//   cache serving Cursor's marketplace. The fixed extension version is
+//   2.1.314; the last attacker activity was seen and blocked on November
+//   1, and Cursor says the incident is contained. Cursor warns that
+//   uninstalling the extension alone may not be enough, because the code
+//   could have added an SSH key and startup persistence - check
+//   authorized SSH keys, look for unexpected remote-login settings, and
+//   rotate any credentials that appeared in coding-agent traces. No
+//   attacker SSH key, tunnel destination, or other payload IoC was named
+//   in the brief, so every query hunts the behaviour and the named
+//   versions - nothing here is invented. Any hit on Variant 1 or 2 means
+//   a workstation may have taken the tampered build - isolate it, check
+//   authorized_keys for keys you do not recognise, and rotate credentials
+//   that appeared in coding-agent traces.
+// ============================================================================
+
+// -- Variant 1: the tampered Claude Code extension builds 2.1.312 / 2.1.313 --
+// The only hard artifact the brief names. Cursor installs marketplace
+// extensions under versioned folders (e.g. anthropic.claude-code-2.1.312),
+// so the signal is any file event under a claude-code folder carrying
+// one of the two tampered versions. The window is 30 days to cover the
+// October 29 exposure and any later reinstall from a cached copy. The
+// fixed version is 2.1.314 - a hit on 2.1.312 or 2.1.313 is the tampered
+// build, not the fix.
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where FolderPath contains "claude-code"
+| where FolderPath contains "2.1.312" or FolderPath contains "2.1.313"
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, SHA256, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 1b: the tampered extension loaded as a process --
+// Same version signal, seen from the process side: Cursor (or VS Code)
+// loading files from a tampered claude-code version folder. Catches the
+// case where the extension was already on disk before the file-event
+// window, or where file events are not collected.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where ProcessCommandLine contains "claude-code"
+| where ProcessCommandLine contains "2.1.312" or ProcessCommandLine contains "2.1.313"
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 2: attacker SSH key added to authorized_keys --
+// The payload's persistence step: add the attacker's own SSH key to the
+// machine. The brief names no key value, so this variant hunts any
+// creation or modification of an authorized_keys file - legitimate
+// provisioning does this too, so triage each hit against your own key
+// management: a key added around October 29, 2026, or a key you do not
+// recognise, is the compromise signal. Scoped to the 30-day window
+// covering the exposure.
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where FileName =~ "authorized_keys"
+| where ActionType in~ ("FileCreated", "FileModified")
+| project TimeGenerated, DeviceName, ActionType, FileName, FolderPath, SHA256, InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 2b: shell commands touching authorized_keys --
+// Same persistence step seen from the process side: a shell or editor
+// writing to an authorized_keys file. The payload ran JavaScript inside
+// the extension host, so the write may not go through a shell at all -
+// this variant is a net for the cases where it does, and for any
+// follow-on manual key planting.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where ProcessCommandLine contains "authorized_keys"
+| where FileName in~ ("bash", "sh", "zsh", "cmd.exe", "powershell.exe", "pwsh.exe", "echo", "cat", "tee", "curl.exe", "wget", "notepad.exe", "code.exe", "cursor.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 3: remote login / SSH server switched on --
+// The payload tried to switch on remote access. On macOS that is
+// systemsetup -setremotelogin on (or launchctl loading sshd); on Windows
+// it is enabling or starting the OpenSSH server. The brief notes the
+// backdoor likely failed on many Windows and macOS systems where SSH was
+// not already enabled, so a remote-login enablement in the exposure
+// window - especially on a machine that never had SSH on - is a strong
+// signal. Legitimate admins enable SSH too, so compare each hit against
+// your change records.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where ProcessCommandLine contains "setremotelogin"
+    or ProcessCommandLine contains "sshd"
+    or ProcessCommandLine contains "ssh.plist"
+    or ProcessCommandLine contains "OpenSSH.Server"
+    or ProcessCommandLine contains "Add-WindowsCapability"
+| where FileName in~ ("systemsetup", "launchctl", "sc.exe", "net.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "dism.exe")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 4: system-information collection by Cursor / VS Code --
+// The payload gathered username, computer name, public IP and Git email
+// in-process as JavaScript, so no shell command is guaranteed - this
+// variant hunts the observable shell-level equivalent: the editor
+// spawning whoami, hostname, ipconfig/ifconfig, or git config to read
+// the user's Git email. Developers run these commands legitimately, so
+// this is a triage signal, not a verdict: look for the burst pattern -
+// several of these in quick succession from the same editor process in
+// the October 29 window - and correlate with Variants 1-3 before
+// acting.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where InitiatingProcessFileName in~ ("Cursor.exe", "Code.exe", "cursor", "code")
+| where FileName in~ ("whoami.exe", "hostname.exe", "ipconfig.exe", "ifconfig", "curl.exe", "wget", "git.exe", "git")
+| where ProcessCommandLine contains "config" or ProcessCommandLine contains "user.email"
+    or FileName in~ ("whoami.exe", "hostname.exe", "ipconfig.exe", "ifconfig")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine, InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
