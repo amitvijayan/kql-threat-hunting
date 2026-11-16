@@ -1,0 +1,152 @@
+// ============================================================================
+// Hunt: ARTEX agentic AI framework - FBI FLASH-20261113-001 IOCs and
+//   exploitation behaviour (FBI, November 13, 2026)
+// MITRE ATT&CK: T1190 (Exploit Public-Facing Application), T1505.003
+//   (Server Software Component: Web Shell), T1078 (Valid Accounts),
+//   T1606.002 (Forge Web Credentials: SAML Tokens), T1090 (Proxy),
+//   T1572 (Protocol Tunneling), T1071.001 (Application Layer Protocol:
+//   Web Protocols), T1041 (Exfiltration Over C2 Channel)
+// Data: Microsoft Defender XDR - DeviceNetworkEvents, DeviceFileEvents,
+//   DeviceProcessEvents, AADSignInEventsBeta
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-16-2026.html
+// Logic: ARTEX is an open-source, LLM-driven multi-agent penetration
+//   testing framework written in Go (released July 2026 by "Autumn-27",
+//   repo removed October 8, 2026; forks and a commercial ARTEX PRO keep
+//   it available). The FBI's FLASH-20261113-001 (TLP:CLEAR, November 13,
+//   2026) says multiple threat actors have weaponized it since at least
+//   August 2026, with some intrusions going from initial targeting to
+//   privileged access in under three hours. Notable campaigns: financially
+//   motivated attacks on South Korean financial institutions (personal
+//   data of ~67,000 people exfiltrated) and the ConnectWise Cloud Backup
+//   supply-chain compromise reaching 2,250+ downstream tenants. Censys
+//   counted 1,600+ publicly exposed ARTEX consoles as of early November.
+//   This file hunts the FLASH's published IOCs and behaviours. It does
+//   NOT duplicate vapor-panda-artex-espionage.kql (CrowdStrike's Vapor
+//   Panda campaign: password spraying, forged tokens, bulk mailbox reads
+//   - no IOCs were published for that campaign) or
+//   connectwise-service-principal-hijack.kql (the SkyKick/ConnectWise
+//   service-principal pattern itself). The FBI warns these IPs are
+//   historically observed infrastructure in the activity window and may
+//   since have been reassigned - corroborate any hit with current
+//   telemetry before blocking. Any hit on Variant 1 or 2 deserves a
+//   look the same day: ARTEX compresses the intrusion window to hours.
+// ============================================================================
+
+// -- Variant 1: FBI FLASH IP IOCs - any connection or sign-in from the
+//    published ARTEX infrastructure --
+//    24 IPs, grouped by context in the FLASH: 38.244.50.120 is the ARTEX
+//    host / open directory (South Korea financial campaign); the
+//    144.172.64.0/24 and 187.15.88-90.0/24 addresses are the ConnectWise
+//    campaign (sign-ins and Graph API activity in customer environments,
+//    transient VPN IPs relevant October 15-16, 2026); the 101.53.80.20
+//    block is proxy IPs for the South Korea campaign; 199.19.95.66-68 are
+//    WISP C2 nodes and 91.92.240.238, 85.11.168.45, 178.16.54.129,
+//    31.77.229.35 are ARTEX servers (Storm-3358 campaign, active as of
+//    November 6, 2026); 85.11.167.52 is a Storm-3358 C2 server. The
+//    30-day window covers the FLASH activity window (since August 2026
+//    activity, review from at least October 1 per the FBI).
+let FlashIPs = dynamic([
+    "38.244.50.120",
+    "144.172.64.60", "144.172.64.99", "144.172.64.128",
+    "187.15.88.186", "187.15.90.217", "187.15.89.186",
+    "101.53.80.20", "205.214.59.31", "124.155.252.63", "154.201.79.246",
+    "23.248.249.90", "23.158.220.98", "103.248.148.84", "203.160.133.172",
+    "209.209.85.38",
+    "199.19.95.66", "199.19.95.67", "199.19.95.68",
+    "91.92.240.238", "85.11.168.45", "178.16.54.129", "31.77.229.35",
+    "85.11.167.52"
+]);
+DeviceNetworkEvents
+| where Timestamp > ago(30d)
+| where RemoteIP in (FlashIPs)
+| project Timestamp, DeviceName, RemoteIP, RemoteUrl, RemotePort,
+    LocalIP, InitiatingProcessFileName, InitiatingProcessCommandLine,
+    ActionType
+| order by Timestamp desc
+
+// -- Variant 1b: the same IOCs in Entra sign-ins --
+//    The ConnectWise campaign signed into customer tenants and hit Graph
+//    API from these addresses. A sign-in from a FLASH IP is a stronger
+//    signal than a bare network connection - check it even if the
+//    network variant is quiet (proxies and VPN egress hide the source).
+AADSignInEventsBeta
+| where Timestamp > ago(30d)
+| where IPAddress in (FlashIPs)
+| project Timestamp, AccountUpn, AppDisplayName, IPAddress, Country,
+    UserAgent, ErrorCode, DeviceDetail
+| order by Timestamp desc
+
+// -- Variant 2: LLM API egress and the xcai.pro reseller --
+//    ARTEX has no model of its own: it calls external LLM providers
+//    (Anthropic Claude, OpenAI GPT, DeepSeek, GLM, Grok, Kimi). The
+//    FLASH names api.anthropic.com, api.deepseek.com, open.bigmodel.cn
+//    and api.x.ai as observed outbound API calls and xcai.pro as the LLM
+//    API reseller used in the South Korea financial campaign. The FBI's
+//    own guidance is to investigate unexpected calls alongside other
+//    suspicious activity - a sanctioned AI tool calling these hosts is
+//    normal, a server process or an unknown binary doing so is not.
+//    xcai.pro has no legitimate business in most estates: treat any
+//    contact with it as a hit. Summarize by device and process so one
+//    noisy workstation does not bury a quiet server.
+let LLMHosts = dynamic([
+    "xcai.pro", "api.deepseek.com", "open.bigmodel.cn", "api.x.ai",
+    "api.anthropic.com"
+]);
+DeviceNetworkEvents
+| where Timestamp > ago(14d)
+| where RemoteUrl has_any (LLMHosts)
+| where InitiatingProcessFileName !in~ (
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
+    "opera.exe", "iexplore.exe"
+)
+| summarize Connections = count(),
+            Hosts = make_set(RemoteUrl, 10),
+            FirstSeen = min(Timestamp),
+            LastSeen = max(Timestamp)
+    by DeviceName, InitiatingProcessFileName
+| order by Connections desc
+
+// -- Variant 3: ARTEX web shells and webhook.site exfiltration --
+//    The FLASH lists *.aspx and *.jsp web shells in unexpected web
+//    application paths (agents deploy JSP and PHP shells, including via
+//    MySQL log poisoning) and command output sent to rotating
+//    webhook.site endpoints, plus outbound transfers of structured data
+//    (names, phone numbers, financial information) over HTTPS. Flag
+//    newly created .aspx/.jsp files under web roots and any webhook.site
+//    contact: triage the shell hits against the application's own
+//    deployments - a file your developers did not put there is the
+//    compromise signal.
+DeviceFileEvents
+| where TimeGenerated > ago(30d)
+| where ActionType == "FileCreated"
+| where FileName endswith ".aspx" or FileName endswith ".jsp"
+| where FolderPath has_any ("inetpub", "wwwroot", "webapps", "htdocs",
+    "tomcat", "webroot")
+| project TimeGenerated, DeviceName, FileName, FolderPath, SHA256,
+    InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by TimeGenerated desc
+
+// -- Variant 3b: webhook.site exfiltration channel --
+DeviceNetworkEvents
+| where Timestamp > ago(14d)
+| where RemoteUrl contains "webhook.site"
+| project Timestamp, DeviceName, RemoteUrl, RemoteIP,
+    InitiatingProcessFileName, InitiatingProcessCommandLine
+| order by Timestamp desc
+
+// -- Variant 4: ARTEX post-exploitation tooling on endpoints --
+//    The FLASH's persistence/C2 inventory: open-source RATs WISP,
+//    vshell and AdaptixC2, traffic tunneled via Chisel and SoftEther,
+//    plus SSH key-pair creation and Elastic IP allocation. Hunt the
+//    named tools by process name or command line. "wisp" and "vshell"
+//    are short strings - expect some noise and triage each hit against
+//    the host's role; a tunneling tool on a server that should never
+//    run one is the signal.
+DeviceProcessEvents
+| where TimeGenerated > ago(30d)
+| where FileName has_any ("chisel", "softether", "wisp", "vshell",
+    "adaptix")
+    or ProcessCommandLine has_any ("chisel", "softether", "webhook.site")
+| project TimeGenerated, DeviceName, FileName, ProcessCommandLine,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, AccountName
+| order by TimeGenerated desc
