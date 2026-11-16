@@ -1,0 +1,94 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Hunt: ARTEX agentic AI framework - FBI FLASH-20261113-001 IOCs and
+// exploitation behaviour (FBI, November 13, 2026).
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-16-2026.html
+// The FBI warns the published IPs are historically observed
+// infrastructure in the activity window and may since have been
+// reassigned - corroborate any hit with current telemetry before
+// blocking. Tune the thresholds to your baseline.
+
+// Variant 1: FBI FLASH IP IOCs in network/proxy traffic
+// 24 IPs from FLASH-20261113-001: ARTEX host/open directory
+// 38.244.50.120; ConnectWise campaign 144.172.64.60, 144.172.64.99,
+// 144.172.64.128 and 187.15.88.186, 187.15.90.217, 187.15.89.186;
+// South Korea campaign proxies 101.53.80.20, 205.214.59.31,
+// 124.155.252.63, 154.201.79.246, 23.248.249.90, 23.158.220.98,
+// 103.248.148.84, 203.160.133.172, 209.209.85.38; WISP C2 nodes
+// 199.19.95.66, 199.19.95.67, 199.19.95.68; Storm-3358 ARTEX servers
+// 91.92.240.238, 85.11.168.45, 178.16.54.129, 31.77.229.35 and C2
+// 85.11.167.52.
+index=YOUR_NETWORK_INDEX earliest=-30d
+    dest_ip IN ("38.244.50.120", "144.172.64.60", "144.172.64.99",
+      "144.172.64.128", "187.15.88.186", "187.15.90.217", "187.15.89.186",
+      "101.53.80.20", "205.214.59.31", "124.155.252.63", "154.201.79.246",
+      "23.248.249.90", "23.158.220.98", "103.248.148.84", "203.160.133.172",
+      "209.209.85.38", "199.19.95.66", "199.19.95.67", "199.19.95.68",
+      "91.92.240.238", "85.11.168.45", "178.16.54.129", "31.77.229.35",
+      "85.11.167.52")
+| stats count as connections, values(url) as urls,
+    values(process) as processes, earliest(_time) as first,
+    latest(_time) as last by src_ip, dest_ip, host
+| sort - connections
+
+// Variant 1b: the same IOCs in Entra / identity sign-ins
+// The ConnectWise campaign signed into customer tenants and hit Graph
+// API from these addresses - a sign-in from a FLASH IP outranks a bare
+// network connection.
+index=YOUR_IDENTITY_INDEX sourcetype="signin_event" earliest=-30d
+    src_ip IN ("38.244.50.120", "144.172.64.60", "144.172.64.99",
+      "144.172.64.128", "187.15.88.186", "187.15.90.217", "187.15.89.186",
+      "101.53.80.20", "205.214.59.31", "124.155.252.63", "154.201.79.246",
+      "23.248.249.90", "23.158.220.98", "103.248.148.84", "203.160.133.172",
+      "209.209.85.38", "199.19.95.66", "199.19.95.67", "199.19.95.68",
+      "91.92.240.238", "85.11.168.45", "178.16.54.129", "31.77.229.35",
+      "85.11.167.52")
+| table _time, user, app, src_ip, country, user_agent, result
+| sort - _time
+
+// Variant 2: LLM API egress and the xcai.pro reseller
+// ARTEX calls external LLM providers; the FLASH names api.anthropic.com,
+// api.deepseek.com, open.bigmodel.cn and api.x.ai, plus xcai.pro as the
+// LLM API reseller in the South Korea financial campaign. Investigate
+// unexpected calls alongside other suspicious activity - exclude browsers
+// and triage against sanctioned AI tooling. Any contact with xcai.pro
+// is a hit on its own.
+index=YOUR_NETWORK_INDEX earliest=-14d
+    (url="*xcai.pro*" OR url="*api.deepseek.com*" OR
+     url="*open.bigmodel.cn*" OR url="*api.x.ai*" OR
+     url="*api.anthropic.com*")
+    process!="chrome.exe" process!="msedge.exe" process!="firefox.exe"
+    process!="brave.exe" process!="opera.exe"
+| stats count as connections, values(url) as urls,
+    earliest(_time) as first, latest(_time) as last by host, process
+| sort - connections
+
+// Variant 3: ARTEX web shells and webhook.site exfiltration
+// The FLASH lists *.aspx and *.jsp web shells in unexpected web
+// application paths and command output sent to rotating webhook.site
+// endpoints. Triage shell hits against the application's own
+// deployments - a file your developers did not put there is the signal.
+index=YOUR_ENDPOINT_INDEX sourcetype="file_event" earliest=-30d
+    action="created" (file_name="*.aspx" OR file_name="*.jsp")
+    (file_path="*inetpub*" OR file_path="*wwwroot*" OR
+     file_path="*webapps*" OR file_path="*htdocs*" OR
+     file_path="*tomcat*" OR file_path="*webroot*")
+| table _time, host, file_name, file_path, hash, process, command_line
+| sort - _time
+
+// Variant 3b: webhook.site exfiltration channel
+index=YOUR_NETWORK_INDEX earliest=-14d url="*webhook.site*"
+| table _time, host, url, dest_ip, process, command_line
+| sort - _time
+
+// Variant 4: ARTEX post-exploitation tooling on endpoints
+// Open-source RATs WISP, vshell and AdaptixC2; traffic tunneled via
+// Chisel and SoftEther. "wisp" and "vshell" are short strings - expect
+// some noise and triage each hit against the host's role.
+index=YOUR_ENDPOINT_INDEX sourcetype="process_event" earliest=-30d
+    (process_name="*chisel*" OR process_name="*softether*" OR
+     process_name="*wisp*" OR process_name="*vshell*" OR
+     process_name="*adaptix*" OR command_line="*chisel*" OR
+     command_line="*softether*" OR command_line="*webhook.site*")
+| table _time, host, process_name, command_line, parent_process, user
+| sort - _time
