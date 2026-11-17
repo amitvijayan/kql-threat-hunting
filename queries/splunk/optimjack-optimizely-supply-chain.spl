@@ -1,0 +1,83 @@
+// Splunk SPL equivalents for the KQL hunting queries.
+// Replace the index names with your own. Same logic, same write-ups.
+// Hunt: Optimizely supply-chain attack ("Optimjack") - malicious
+// JavaScript injected into Optimizely Experimentation projects, served
+// from cdn.optimizely.com (BleepingComputer / Scott Helme, November 16,
+// 2026).
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-17-2026.html
+// The second-stage host 1688360.cc is the only published IOC: any
+// contact with it means the device loaded the clipboard hijacker, the
+// card skimmer, or the Coruna/DarkSword iOS exploit kits. Variants 2
+// and 3 are exposure scoping only - cdn.optimizely.com and the affected
+// sites are legitimate destinations that happened to serve poisoned
+// scripts on November 16. Tune the thresholds to your baseline.
+
+// Variant 1: any connection to the second-stage host 1688360.cc
+// The injected Optimizely scripts pull track.js from this domain. A hit
+// means the device loaded the second stage - check the browser session,
+// any payment details or wallet addresses entered or copied around that
+// time, and any iOS device on the same network.
+index=YOUR_NETWORK_INDEX earliest=-14d url="*1688360.cc*"
+| stats count as connections, values(url) as urls,
+    values(process) as processes, earliest(_time) as first,
+    latest(_time) as last by src_ip, dest_ip, host
+| sort - connections
+
+// Variant 1b: the same second-stage host, mobile / iOS devices only
+// The Coruna and DarkSword exploit kits in the payload target iPhones
+// and iPads. Filter to iOS user agents to isolate the exploit-kit path
+// from the skimmer/clipper path.
+index=YOUR_NETWORK_INDEX earliest=-14d url="*1688360.cc*"
+    (user_agent="*iPhone*" OR user_agent="*iPad*" OR
+     user_agent="*iOS*")
+| table _time, src_ip, dest_ip, host, url, user_agent, process
+| sort - _time
+
+// Variant 2: hosts that loaded Optimizely CDN scripts on the campaign
+// day (November 16, 2026)
+// Exposure scoping, NOT a compromise indicator: cdn.optimizely.com is
+// a legitimate CDN and most loads that day were clean. Use this list to
+// prioritize Variant 1 follow-up and to answer "who in the org could
+// have seen a poisoned script".
+index=YOUR_NETWORK_INDEX earliest=11/16/2026:00:00:00
+    latest=11/17/2026:00:00:00 url="*cdn.optimizely.com*"
+| stats count as loads, values(url) as urls,
+    earliest(_time) as first, latest(_time) as last by src_ip, host
+| sort - loads
+
+// Variant 3: visits to confirmed affected sites on November 16
+// BleepingComputer confirmed from urlscan.io scans that the malicious
+// script loaded or attempted to load on Zoom, CNN, Fox News, BBC,
+// Salesforce, GitLab, KLM, Air France, HSBC Insurance, Bitly,
+// Change.org, UNICEF USA, Scheels, American Girl, ManageBuilding,
+// Smartsheet, Stamps.com, Mutual of Omaha, American Eagle, IG - and
+// Optimizely's own website. A visit on November 16 means the visitor
+// may have been served the poisoned script; a visit on any other day
+// does not. Pair this list with Variant 1 before calling anything a
+// compromise.
+index=YOUR_NETWORK_INDEX earliest=11/16/2026:00:00:00
+    latest=11/17/2026:00:00:00
+    (url="*zoom.us*" OR url="*cnn.com*" OR url="*foxnews.com*" OR
+     url="*bbc.com*" OR url="*salesforce.com*" OR url="*gitlab.com*" OR
+     url="*klm.com*" OR url="*airfrance.com*" OR url="*hsbc.com*" OR
+     url="*bitly.com*" OR url="*change.org*" OR url="*unicefusa.org*" OR
+     url="*scheels.com*" OR url="*americangirl.com*" OR
+     url="*managebuilding.com*" OR url="*smartsheet.com*" OR
+     url="*stamps.com*" OR url="*mutualofomaha.com*" OR url="*ae.com*" OR
+     url="*ig.com*" OR url="*optimizely.com*")
+| stats count as visits, values(url) as urls,
+    earliest(_time) as first, latest(_time) as last by src_ip, host
+| sort - visits
+
+// Variant 4: track.js written to disk
+// Browsers cache fetched scripts, so a copy of track.js landing in a
+// browser cache or download folder corroborates a Variant 1 hit. On its
+// own this is weak - track.js is a common filename - so require the
+// 1688360.cc path or a browser process as the writer before treating
+// it as evidence.
+index=YOUR_ENDPOINT_INDEX sourcetype="file_event" earliest=-14d
+    file_name="track.js"
+    (file_path="*1688360*" OR process="chrome.exe" OR
+     process="msedge.exe" OR process="firefox.exe" OR process="brave.exe")
+| table _time, host, file_name, file_path, process, action
+| sort - _time
