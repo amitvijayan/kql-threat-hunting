@@ -1,0 +1,119 @@
+// ============================================================================
+// Hunt: Optimizely supply-chain attack ("Optimjack") - malicious JavaScript
+//   injected into Optimizely Experimentation projects, served from
+//   cdn.optimizely.com (BleepingComputer / Scott Helme, November 16, 2026)
+// MITRE ATT&CK: T1195.002 (Supply Chain Compromise: Compromise Software
+//   Supply Chain), T1189 (Drive-by Compromise), T1115 (Clipboard Data),
+//   T1203 (Exploitation for Client Execution)
+// Data: Microsoft Defender XDR - DeviceNetworkEvents, DeviceFileEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-17-2026.html
+// Logic: Attackers exploited a vulnerability in the Optimizely
+//   Experimentation account signup flow to inject malicious JavaScript
+//   into customer projects. Because Optimizely scripts load directly
+//   into its customers' webpages, the poisoned files were served from
+//   cdn.optimizely.com carrying a valid Optimizely certificate, so
+//   browsers and most allowlists treated them as legitimate. Researcher
+//   Scott Helme (Report URI) analyzed 1,611 Optimizely scripts and found
+//   188 infected files belonging to 178 organizations. The injected code
+//   loads a second-stage script from 1688360.cc/track.js, which combines
+//   a cryptocurrency clipboard hijacker (swaps wallet addresses in copied
+//   text), a payment card skimmer, and the Coruna and DarkSword exploit
+//   kits targeting iPhones and iPads. Wallets embedded in the payload had
+//   received about $7,000 by November 16 - evidence the clipper had
+//   already paid off. The campaign ran roughly 17 hours on November 16;
+//   a mass removal between about 20:40 and 21:10 UTC cut infected scripts
+//   from 169 to one, and by 21:52 UTC only a single file - belonging to UK
+//   broadband provider TalkTalk - still carried the malicious code.
+//   Clipboard hijacking itself is not visible in Defender telemetry, so
+//   the network contact to 1688360.cc is the detection point: any device
+//   that fetched track.js from that domain loaded the second stage.
+//   Variants 2 and 3 are exposure scoping, not compromise indicators -
+//   cdn.optimizely.com and the affected sites are legitimate destinations
+//   that happened to serve poisoned scripts on November 16. No CVE ID
+//   was published for the signup-flow flaw, so none is hunted here.
+// ============================================================================
+
+// -- Variant 1: any connection to the second-stage host 1688360.cc --
+//    The injected Optimizely scripts pull track.js from this domain.
+//    A hit means the device loaded the clipboard hijacker, the card
+//    skimmer, or the iOS exploit kits. Treat every hit as an incident:
+//    check the browser session, any payment details or wallet addresses
+//    entered or copied around that time, and any iOS device on the same
+//    network. The 14-day window covers the November 16 campaign day
+//    with room for late-reporting telemetry.
+DeviceNetworkEvents
+| where Timestamp > ago(14d)
+| where RemoteUrl has "1688360.cc"
+| project Timestamp, DeviceName, DeviceId, RemoteUrl, RemoteIP,
+    RemotePort, LocalIP, InitiatingProcessFileName,
+    InitiatingProcessCommandLine, ActionType
+| order by Timestamp desc
+
+// -- Variant 1b: the same second-stage host, mobile / iOS devices only --
+//    The Coruna and DarkSword exploit kits in the payload target iPhones
+//    and iPads. Defender-enrolled iOS devices report network events too,
+//    so re-run Variant 1 filtered to them: a hit here is the exploit-kit
+//    path, not just the skimmer/clipper path. Include Android as a
+//    sanity check - the brief ties the kits to iOS only.
+DeviceNetworkEvents
+| where Timestamp > ago(14d)
+| where RemoteUrl has "1688360.cc"
+| where OSPlatform has_any ("iOS", "iPadOS")
+| project Timestamp, DeviceName, DeviceId, RemoteUrl, RemoteIP,
+    RemotePort, InitiatingProcessFileName, ActionType
+| order by Timestamp desc
+
+// -- Variant 2: devices that loaded Optimizely CDN scripts on the
+//    campaign day (November 16, 2026) --
+//    Exposure scoping, NOT a compromise indicator: cdn.optimizely.com
+//    is a legitimate CDN and most loads that day were clean. Use this
+//    list to prioritize Variant 1 follow-up and to answer "who in the
+//    org could have seen a poisoned script" - cross-reference it with
+//    the Variant 1 hits and with payment/wallet activity on November 16.
+DeviceNetworkEvents
+| where Timestamp between (datetime(2026-11-16) .. datetime(2026-11-17))
+| where RemoteUrl has "cdn.optimizely.com"
+| summarize Loads = count(), FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp), Urls = make_set(RemoteUrl, 5)
+    by DeviceName, DeviceId
+| order by Loads desc
+
+// -- Variant 3: visits to confirmed affected sites on November 16 --
+//    BleepingComputer confirmed from urlscan.io scans that the malicious
+//    script loaded or attempted to load on these sites (among others):
+//    Zoom, CNN, Fox News, BBC, Salesforce, GitLab, KLM, Air France,
+//    HSBC Insurance, Bitly, Change.org, UNICEF USA, Scheels, American
+//    Girl, ManageBuilding, Smartsheet, Stamps.com, Mutual of Omaha,
+//    American Eagle, IG - and Optimizely's own website. A visit on
+//    November 16 means the visitor may have been served the poisoned
+//    script; a visit on any other day does not. Pair this list with
+//    Variant 1 before calling anything a compromise.
+let AffectedSites = dynamic([
+    "zoom.us", "cnn.com", "foxnews.com", "bbc.com", "salesforce.com",
+    "gitlab.com", "klm.com", "airfrance.com", "hsbc.com", "bitly.com",
+    "change.org", "unicefusa.org", "scheels.com", "americangirl.com",
+    "managebuilding.com", "smartsheet.com", "stamps.com",
+    "mutualofomaha.com", "ae.com", "ig.com", "optimizely.com"
+]);
+DeviceNetworkEvents
+| where Timestamp between (datetime(2026-11-16) .. datetime(2026-11-17))
+| where RemoteUrl has_any (AffectedSites)
+| summarize Visits = count(), FirstSeen = min(Timestamp),
+    LastSeen = max(Timestamp), Sites = make_set(RemoteUrl, 5)
+    by DeviceName, DeviceId
+| order by Visits desc
+
+// -- Variant 4: track.js written to disk --
+//    Browsers cache fetched scripts, so a copy of track.js landing in a
+//    browser cache or download folder corroborates a Variant 1 hit and
+//    gives a file to submit for analysis. On its own this is weak -
+//    track.js is a common filename - so require the 1688360.cc path or
+//    a browser process as the writer before treating it as evidence.
+DeviceFileEvents
+| where Timestamp > ago(14d)
+| where FileName == "track.js"
+| where FolderPath has "1688360" or InitiatingProcessFileName in~
+    ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe")
+| project Timestamp, DeviceName, DeviceId, FileName, FolderPath,
+    InitiatingProcessFileName, InitiatingProcessCommandLine, ActionType
+| order by Timestamp desc
