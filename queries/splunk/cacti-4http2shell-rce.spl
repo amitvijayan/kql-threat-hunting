@@ -1,0 +1,136 @@
+# ============================================================================
+# Hunt: Cacti 4HTTP2SHELL zero-day - unauthenticated RCE via guest graph
+#   settings (no CVE assigned as of November 27, 2026)
+# MITRE ATT&CK: T1190, T1059.004, T1505.003, T1071.001, T1552.001
+# Data: web/proxy access logs, endpoint file/process data, network logs
+#   (substitute your own index and sourcetype)
+# Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-28-2026.html
+# Logic: disclosed November 26, 2026 by researcher ek0ms savi0r (Church of
+# Malware) as "4HTTP2SHELL" (also "4HTTP2ROOT"), with a public proof of
+# concept and no patch. No CVE identifier had been assigned as of November
+# 27, 2026, and no in-the-wild exploitation had been reported (watchTowr).
+# The chain needs four HTTP requests against a Cacti server with the guest
+# account enabled (guest is disabled by default since Cacti 0.8.7) and was
+# demonstrated against Cacti Core 1.2.31: an unauthenticated guest saves a
+# non-numeric string into "preview_graphs_per_page" via
+# auth_profile.php?action=update_data; loading graph_view.php with default
+# filters executes the stored SQL, an UPDATE that rewrites a row in Cacti's
+# poller table; invoking graph_realtime.php makes the poller pass that row
+# to PHP's popen(), giving OS command execution as the Cacti server user.
+# BleepingComputer's detection advice: review poller configurations for
+# unexpected commands and examine application logs for warnings about
+# non-numeric values in graph display settings. Cacti stores credentials
+# and SNMP passphrases for monitored devices, so a shell on the monitoring
+# server is a pivot into the rest of the network. Mitigation until a patch
+# ships: disable the guest account and restrict the Cacti web interface to
+# trusted networks.
+# ============================================================================
+
+# -- Variant 1: guest saving a non-numeric graph setting -------------------
+# The first request of the chain. A legitimate guest sets a page count
+# (digits only); the exploit stores arbitrary SQL text in
+# preview_graphs_per_page. URL-encoded payloads still start with a
+# non-digit character, which is what the regex tests. Run over at least
+# 7 days: disclosure was November 26, 2026.
+index=web sourcetype=access_combined
+  uri_path="*/auth_profile.php" uri_query="*action=update_data*"
+  uri_query="*preview_graphs_per_page=*"
+| rex field=uri_query "preview_graphs_per_page=(?<setting_value>[^&]*)"
+| where NOT match(setting_value, "^[0-9]+$")
+| stats count AS Requests,
+    values(setting_value) AS SettingValues,
+    values(method) AS Methods,
+    values(status) AS Statuses,
+    min(_time) AS FirstSeen,
+    max(_time) AS LastSeen
+  by src_ip, uri_path
+| sort - FirstSeen
+
+# -- Variant 2: the trigger request, correlated with the setup -------------
+# graph_realtime.php is what turns the stored SQL into a command. On its
+# own it is a legitimate endpoint, so this search only returns trigger
+# requests from an IP that also made the update_data request above - the
+# two are minutes apart in the four-request chain. The transaction keeps
+# the setup and the trigger together in one row.
+index=web sourcetype=access_combined
+  (uri_path="*/auth_profile.php" OR uri_path="*/graph_realtime.php"
+   OR uri_path="*/graph_view.php")
+| eval stage=case(
+    uri_path LIKE "%auth_profile.php%" AND uri_query LIKE "%action=update_data%", "setup",
+    uri_path LIKE "%graph_realtime.php%", "trigger",
+    uri_path LIKE "%graph_view.php%", "view")
+| transaction src_ip maxspan=1h
+| where mvcount(stage) >= 2 AND mvfind(stage, "setup") >= 0
+    AND mvfind(stage, "trigger") >= 0
+| table _time, src_ip, stage, uri_path, uri_query, method, status
+| sort - _time
+
+# -- Variant 3: Cacti log warnings about non-numeric graph settings -------
+# The vendor-side tell BleepingComputer named: application logs warning
+# about non-numeric values in graph display settings. Substitute your
+# Cacti log index/sourcetype; the message text is the match, not the
+# sourcetype. Any hit is a direct exploitation attempt, not a false
+# positive - legitimate settings are always numeric.
+index=cacti sourcetype=cacti_log
+  ("non-numeric" OR "non numeric" OR "invalid" OR "NaN")
+  (graph OR preview OR setting)
+| stats count AS Warnings,
+    values(_raw) AS Samples,
+    min(_time) AS FirstSeen,
+    max(_time) AS LastSeen
+  by host
+| sort - Warnings
+
+# -- Variant 4: web-server process spawning a shell ------------------------
+# The exploit ends in popen(), which spawns a shell (sh -c) from the PHP
+# process serving graph_realtime.php. Requires endpoint process data in
+# Splunk (e.g. Sysmon EventCode 1, osquery process_events, or your EDR
+# feed) - substitute the sourcetype and field names. A web-server process
+# forking a shell interpreter is anomalous on its own.
+index=endpoint sourcetype=Sysmon EventCode=1
+  (ParentImage="*httpd*" OR ParentImage="*apache2*" OR ParentImage="*php*"
+   OR ParentImage="*nginx*")
+  (Image="*\\sh.exe" OR Image="*/sh" OR Image="*/bash" OR Image="*/dash"
+   OR Image="*/zsh" OR Image="*curl*" OR Image="*wget*"
+   OR Image="*nc*" OR Image="*ncat*" OR Image="*socat*"
+   OR Image="*python*" OR Image="*perl*")
+| stats count AS Events,
+    values(CommandLine) AS CommandLines,
+    min(_time) AS FirstSeen,
+    max(_time) AS LastSeen
+  by Computer, ParentImage, Image
+| sort - FirstSeen
+
+# -- Variant 5: unexpected files under the Cacti web root ------------------
+# If the attacker drops a persistent shell after the popen() execution,
+# it lands as a file created under the Cacti document root. Requires file
+# monitoring data in Splunk (Sysmon EventCode 11, osquery file_events, or
+# your EDR feed) - substitute the sourcetype and field names. Legitimate
+# Cacti writes of script files here are rare; check any hit's contents.
+index=endpoint sourcetype=Sysmon EventCode=11
+  (TargetFilename="*cacti*.php" OR TargetFilename="*cacti*.phtml"
+   OR TargetFilename="*cacti*.sh" OR TargetFilename="*cacti*.pl")
+| stats count AS Events,
+    values(TargetFilename) AS Files,
+    values(Image) AS CreatingProcesses,
+    min(_time) AS FirstSeen,
+    max(_time) AS LastSeen
+  by Computer
+| sort - FirstSeen
+
+# -- Variant 6: outbound network from the Cacti host's web processes ------
+# A monitoring server's web processes rarely open outbound connections to
+# the internet. A connection from httpd/php to an external IP shortly
+# after the exploit chain is the callback or second-stage download.
+# Substitute your network index/sourcetype and exclude your update and
+# package-mirror destinations before triaging.
+index=network sourcetype=firewall
+  (process="httpd" OR process="apache2" OR process="php" OR process="nginx")
+  NOT dest_ip IN (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.1)
+| stats count AS Connections,
+    values(dest_ip) AS Destinations,
+    values(dest_port) AS Ports,
+    min(_time) AS FirstSeen,
+    max(_time) AS LastSeen
+  by src_ip, process
+| sort - FirstSeen
