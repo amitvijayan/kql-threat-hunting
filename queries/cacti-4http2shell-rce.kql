@@ -1,0 +1,144 @@
+// ============================================================================
+// Hunt: Cacti 4HTTP2SHELL zero-day - unauthenticated RCE via guest graph
+//   settings (no CVE assigned as of November 27, 2026)
+// MITRE ATT&CK: T1190 (Exploit Public-Facing Application), T1059.004
+//   (Command and Scripting Interpreter: Unix Shell), T1505.003 (Server
+//   Software Component: Web Shell), T1071.001 (Web Protocols),
+//   T1552.001 (Credentials In Files)
+// Data: Microsoft Defender - DeviceProcessEvents, W3CIISLog,
+//   DeviceFileEvents, DeviceNetworkEvents
+// Write-up: https://amitvijayan.com/journal/articles/daily-cyber-threat-brief-november-28-2026.html
+// Logic: disclosed November 26, 2026 by researcher ek0ms savi0r (Church of
+// Malware) as "4HTTP2SHELL" (also "4HTTP2ROOT"), with a public proof of
+// concept and no patch. No CVE identifier had been assigned as of November
+// 27, 2026, and no in-the-wild exploitation had been reported (watchTowr).
+// The chain needs four HTTP requests against a Cacti server with the guest
+// account enabled (guest is disabled by default since Cacti 0.8.7) and was
+// demonstrated against Cacti Core 1.2.31: (1) an unauthenticated guest saves
+// a profile setting, writing an arbitrary non-numeric string into
+// "preview_graphs_per_page" via auth_profile.php?action=update_data;
+// (2) the stored value bypasses request validation; (3) loading
+// graph_view.php with default filters executes the stored SQL, an UPDATE
+// that rewrites a row in Cacti's poller table; (4) invoking
+// graph_realtime.php makes the poller pass that row to PHP's popen() with
+// no allowlist, giving OS command execution as the Cacti server user (the
+// researcher demonstrated root; the privilege depends on the account
+// running the web server and poller). BleepingComputer's detection advice:
+// review poller configurations for unexpected commands and examine
+// application logs for warnings about non-numeric values in graph display
+// settings. Cacti stores credentials and SNMP passphrases for monitored
+// devices, so a shell on the monitoring server is a pivot into the rest of
+// the network. Mitigation until a patch ships: disable the guest account
+// and restrict the Cacti web interface to trusted networks. Cacti has form
+// here: CVE-2022-46169 (unauthenticated command injection) reached CISA
+// KEV in February 2023 after botnets picked it up.
+// ============================================================================
+
+// -- Variant 1: web-server / PHP process spawning a shell ------------------
+// The exploit ends in popen(), which spawns a shell (sh -c) from the PHP
+// process serving graph_realtime.php. A web-server process spawning a shell
+// interpreter is anomalous on its own - the poller legitimately runs
+// scripts, but it does so through php, not by forking sh/bash from httpd.
+// Run over at least 7 days: disclosure was November 26, 2026.
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName in~ ("httpd", "apache2", "php", "php-fpm", "php-cgi", "nginx")
+| where FileName in~ ("sh", "bash", "dash", "zsh", "ksh")
+| where isnotempty(ProcessCommandLine)
+| project TimeGenerated, DeviceName, InitiatingProcessFileName,
+          InitiatingProcessFolderPath, FileName, FolderPath,
+          ProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 1b: web-server process spawning post-exploit tooling ---------
+// Same ancestry, different children: curl/wget fetching a second stage,
+// netcat/socat reverse shells, python/perl one-liners. The command-line
+// markers catch the classic reverse-shell shapes (/dev/tcp, mkfifo,
+// interactive shells). Tune the initiating-process list to whatever runs
+// Cacti in your estate.
+DeviceProcessEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName in~ ("httpd", "apache2", "php", "php-fpm", "php-cgi", "nginx")
+| where FileName in~ ("curl", "wget", "nc", "ncat", "socat", "python", "python3", "perl", "ruby")
+| where ProcessCommandLine has_any ("/dev/tcp", "mkfifo", "bash -i", "sh -i",
+    "reverse", "e >&0", "0>&1")
+    or FileName in~ ("nc", "ncat", "socat")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName,
+          FolderPath, ProcessCommandLine, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 2: guest saving a non-numeric graph setting (IIS logs) -------
+// The first request of the chain: auth_profile.php?action=update_data with
+// preview_graphs_per_page set to something that is not a number. A
+// legitimate guest sets a page count (digits only); the exploit stores
+// arbitrary SQL text here. URL-encoded payloads still start with a
+// non-digit character, which is what the regex tests. Cacti usually runs
+// on Apache, not IIS - if your Apache logs are ingested via AMA they land
+// in ApacheHTTPServer; the same stem/query test applies there (see the
+// Splunk companion for the access-log form of this hunt).
+W3CIISLog
+| where TimeGenerated > ago(7d)
+| where csUriStem has "auth_profile.php"
+| where csUriQuery has "action=update_data"
+| where csUriQuery has "preview_graphs_per_page"
+| where csUriQuery matches regex @"preview_graphs_per_page=[^0-9]"
+| project TimeGenerated, DeviceName, cIP, csUserName, csMethod, csUriStem,
+          csUriQuery, scStatus
+| order by TimeGenerated desc
+
+// -- Variant 2b: the trigger request, correlated with the setup -----------
+// graph_realtime.php is what turns the stored SQL into a command. On its
+// own it is a legitimate endpoint, so this variant only flags hosts that
+// ALSO saw the update_data request from the same client IP in the same
+// hour - the two requests are minutes apart in the four-request chain.
+let SetupIPs =
+    W3CIISLog
+    | where TimeGenerated > ago(7d)
+    | where csUriStem has "auth_profile.php"
+    | where csUriQuery has "action=update_data"
+    | where csUriQuery has "preview_graphs_per_page"
+    | where csUriQuery matches regex @"preview_graphs_per_page=[^0-9]"
+    | summarize SetupCount = count(), FirstSetup = min(TimeGenerated)
+        by cIP;
+W3CIISLog
+| where TimeGenerated > ago(7d)
+| where csUriStem has "graph_realtime.php"
+| join kind=inner (SetupIPs) on cIP
+| where TimeGenerated between (FirstSetup .. (FirstSetup + 1h))
+| project TimeGenerated, DeviceName, cIP, csUserName, csMethod, csUriStem,
+          csUriQuery, scStatus, SetupCount, FirstSetup
+| order by TimeGenerated desc
+
+// -- Variant 3: web-shell or unexpected files under the Cacti web root ----
+// If the attacker drops a persistent shell after the popen() execution,
+// it lands as a file created by the web-server process under the Cacti
+// document root. Legitimate Cacti writes here are rare; treat any
+// script file created by httpd/php as a lead and check its contents.
+DeviceFileEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName in~ ("httpd", "apache2", "php", "php-fpm", "php-cgi", "nginx")
+| where ActionType in ("FileCreated", "FileModified")
+| where FolderPath has "cacti"
+| where FileName endswith ".php" or FileName endswith ".phtml"
+    or FileName endswith ".sh" or FileName endswith ".pl"
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, FileName,
+          FolderPath, ActionType, SHA256, AccountName
+| order by TimeGenerated desc
+
+// -- Variant 4: outbound network from the Cacti host's web processes -----
+// A monitoring server's web processes rarely open outbound connections to
+// the internet. A connection from httpd/php to an external IP shortly
+// after the exploit chain is the callback / second-stage download. Exclude
+// your update and package-mirror destinations before triaging.
+DeviceNetworkEvents
+| where TimeGenerated > ago(7d)
+| where InitiatingProcessFileName in~ ("httpd", "apache2", "php", "php-fpm", "php-cgi", "nginx")
+| where isnotempty(RemoteIP)
+| where not (RemoteIP startswith "10." or RemoteIP startswith "192.168."
+    or RemoteIP startswith "172.16." or RemoteIP startswith "172.17."
+    or RemoteIP startswith "172.18." or RemoteIP startswith "172.19."
+    or RemoteIP startswith "172.2" or RemoteIP startswith "172.30."
+    or RemoteIP startswith "172.31." or RemoteIP == "127.0.0.1")
+| project TimeGenerated, DeviceName, InitiatingProcessFileName, RemoteIP,
+          RemotePort, RemoteUrl, ActionType
+| order by TimeGenerated desc
